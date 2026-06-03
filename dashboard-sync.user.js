@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         Dashboard <-> Local Bridge
-// @namespace    https://github.com/yourname/overlay-tool
+// @namespace    https://github.com/wirumn/CraftCast
 // @version      1.3.0
 // @description  Two-way sync between a local WebSocket app (127.0.0.1:8014) and a reactive web dashboard.
 // @author       you
