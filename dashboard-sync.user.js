@@ -113,7 +113,7 @@
     if (!label) return;
     const container = label.closest('.labelrow, .simplerow');
     if (!container) return;
-    const input = container.querySelector('input');
+    const input = container.querySelector('input, select');
     if (!input || input.value == value) return;
     setReactiveValue(input, value);
     log('auto-updated', labelText, 'to', value);
@@ -137,6 +137,11 @@
 
     if (typeof msg.condition !== 'string') return;
     const step = (typeof msg.step === 'number' && Number.isFinite(msg.step)) ? msg.step : null;
+
+    // Reset Thiria to Auto rating when a new craft begins
+    if (step === 1 && lastProcessedStep === null) {
+        setInputByLabel('Rating', 'auto');
+    }
 
     // Auto-click Start button if we haven't started the solver yet
     const startBtn = Array.from(document.querySelectorAll('button')).find(b => b.textContent.trim() === 'Start');
