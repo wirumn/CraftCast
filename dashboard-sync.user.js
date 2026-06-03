@@ -162,8 +162,9 @@
 
     if (advanced) {
       setTimeout(() => {
-        const btn = Array.from(document.querySelectorAll('button, label')).find(b => b.textContent.includes('Success'));
-        if (btn) {
+        const btns = Array.from(document.querySelectorAll('button, label')).filter(b => b.textContent.includes('Success'));
+        if (btns.length > 0) {
+          const btn = btns[btns.length - 1]; // The active step is always the last one on the page
           btn.click();
           log('auto-clicked success');
         }
