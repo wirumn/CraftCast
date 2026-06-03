@@ -122,25 +122,39 @@
     if (typeof msg !== 'object' || msg === null) return;
     if (msg.type === 'pong') { lastPongAt = Date.now(); return; }
 
-    // Auto-update stats if present!
+    // Auto-update character stats
     if (msg.craftsmanship) setInputByLabel('craftsmanship', msg.craftsmanship);
     if (msg.control) setInputByLabel('control', msg.control);
     if (msg.cp) setInputByLabel('cp', msg.cp);
-    if (msg.difficulty) setInputByLabel('progress', msg.difficulty);
-    if (msg.durability) setInputByLabel('durability', msg.durability);
-    if (msg.maxQuality) setInputByLabel('quality', msg.maxQuality);
+
+    // We no longer sync difficulty/durability/quality because FFXIVClientStructs offsets are returning garbage data for them.
 
     if (typeof msg.condition !== 'string') return;
     const step = (typeof msg.step === 'number' && Number.isFinite(msg.step)) ? msg.step : null;
+    
+    let advanced = false;
+    if (step !== null && lastProcessedStep !== null && step > lastProcessedStep) {
+        advanced = true;
+    }
+
     if (step !== null && step === lastProcessedStep) return;
 
     const select = document.querySelector(CONFIG.conditionSelect);
     if (!select) return;
     if (step !== null) lastProcessedStep = step;
-    if (select.value === msg.condition) return;
 
     setReactiveValue(select, msg.condition);
     log('applied condition', msg.condition, 'step', step);
+
+    if (advanced) {
+      setTimeout(() => {
+        const btn = Array.from(document.querySelectorAll('button, label')).find(b => b.textContent.includes('Success'));
+        if (btn) {
+          btn.click();
+          log('auto-clicked success');
+        }
+      }, 50);
+    }
   }
 
   let observer = null;
