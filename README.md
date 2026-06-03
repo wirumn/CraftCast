@@ -5,11 +5,7 @@ crafting session to a web-based crafting solver. It reads crafting state from
 game memory and sends it to a paired userscript over a local WebSocket; the
 solver's suggested next action is sent back and shown as an overlay.
 
-It runs automatically — start a synthesis and the overlay appears.
-
-> ⚠️ Reads game memory via FFXIVClientStructs. It sends no packets and simulates
-> no inputs, but in-process memory reading still violates the FFXIV Terms of
-> Service and carries account-action risk. Use at your own risk.
+It runs automatically - start a synthesis and the overlay appears.
 
 ## Project layout
 
