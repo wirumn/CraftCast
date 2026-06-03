@@ -161,8 +161,23 @@
     const selects = Array.from(document.querySelectorAll(CONFIG.conditionSelect));
     if (selects.length > 0) {
         const select = selects[selects.length - 1]; // Always target the last (active) step's dropdown
-        setReactiveValue(select, msg.condition);
-        log('applied condition', msg.condition, 'step', step);
+        
+        const conditionMap = {
+            'normal': 'Normal',
+            'good': 'Good',
+            'excellent': 'Excellent',
+            'poor': 'Poor',
+            'centered': 'Centered',
+            'sturdy': 'Sturdy',
+            'pliant': 'Pliant',
+            'malleable': 'Malleable',
+            'primed': 'Primed',
+            'goodomen': 'Good Omen'
+        };
+        const mappedCondition = conditionMap[msg.condition] || msg.condition;
+        
+        setReactiveValue(select, mappedCondition);
+        log('applied condition', mappedCondition, 'step', step);
     }
     
     if (step !== null) lastProcessedStep = step;
