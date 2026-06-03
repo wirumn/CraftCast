@@ -224,14 +224,14 @@
          }
          
          if (container) {
-             const match = container.innerText.match(/Use\s+([A-Za-z0-9\s]+)\./);
+             const match = container.innerText.match(/Use\s+([^.]+)\./);
              if (match) text = match[1].trim();
          }
       } else {
          // Fallback for standard mode (macro list)
          const list = document.querySelector('#instruction-list, .instruction-list');
          if (list && list.firstElementChild) {
-             const match = list.firstElementChild.innerText.match(/Use\s+([A-Za-z0-9\s]+)/);
+             const match = list.firstElementChild.innerText.match(/Use\s+([^.\n]+)/);
              if (match) text = match[1].trim();
          }
       }
