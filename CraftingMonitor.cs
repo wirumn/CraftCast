@@ -62,10 +62,6 @@ public sealed class CraftingMonitor
             _active = true;
             if (condition == _lastCondition && step == _lastStep) return; // no change
 
-            // RATE LIMIT to prevent main-thread lag if memory is garbage
-            if ((DateTime.UtcNow - _lastTick).TotalMilliseconds < 100) return;
-            _lastTick = DateTime.UtcNow;
-
             _lastCondition = condition;
             _lastStep = step;
             _state.SetState(condition, step);
