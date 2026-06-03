@@ -39,7 +39,6 @@
     statFields: {
       craftsmanship: 'craftsmanship',
       control:       'control',
-      cp:            'cp',
       progress:      'difficulty',
       durability:    'durability',
       quality:       'maxQuality',
