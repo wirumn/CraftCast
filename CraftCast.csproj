@@ -1,51 +1,25 @@
-<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Dalamud.NET.Sdk/15.0.0">
+
+  <!--
+    The Dalamud SDK supplies all framework references (Dalamud, ImGui bindings,
+    FFXIVClientStructs, InteropGenerator, Newtonsoft) and generates the packaged
+    manifest from the metadata below — so no manual <Reference> items and no
+    separate CraftCast.json are needed.
+  -->
 
   <PropertyGroup>
-    <TargetFramework>net10.0-windows</TargetFramework>
-    <Platforms>x64</Platforms>
-    <OutputType>Library</OutputType>
-    <Nullable>enable</Nullable>
-    <ImplicitUsings>enable</ImplicitUsings>
-    <LangVersion>latest</LangVersion>
+    <AssemblyVersion>1.0.0.0</AssemblyVersion>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
-    <RootNamespace>CraftCast</RootNamespace>
-    <AssemblyName>CraftCast</AssemblyName>
-    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
-    <ProduceReferenceAssembly>false</ProduceReferenceAssembly>
-    <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
   </PropertyGroup>
 
-  <!-- Local Dalamud dev assemblies installed by XIVLauncher. -->
   <PropertyGroup>
-    <DalamudLibPath>$(appdata)\XIVLauncher\addon\Hooks\dev\</DalamudLibPath>
+    <Author>wirumn</Author>
+    <Name>CraftCast</Name>
+    <Punchline>Bridges live FFXIV crafting state to a web solver over a local WebSocket.</Punchline>
+    <Description>Reads the active craft condition, step, your stats, and the recipe's constraints each framework tick, broadcasts them over a local WebSocket (127.0.0.1:8014) to a paired userscript, and renders the solver's suggested next action as a borderless overlay anchored to the Synthesis window.</Description>
+    <RepoUrl>https://github.com/wirumn/CraftCast</RepoUrl>
+    <Tags>crafting;overlay;websocket;solver</Tags>
+    <AcceptsFeedback>false</AcceptsFeedback>
   </PropertyGroup>
-
-  <ItemGroup>
-    <Reference Include="Dalamud">
-      <HintPath>$(DalamudLibPath)Dalamud.dll</HintPath>
-      <Private>false</Private>
-    </Reference>
-    <Reference Include="Dalamud.Bindings.ImGui">
-      <HintPath>$(DalamudLibPath)Dalamud.Bindings.ImGui.dll</HintPath>
-      <Private>false</Private>
-    </Reference>
-    <Reference Include="FFXIVClientStructs">
-      <HintPath>$(DalamudLibPath)FFXIVClientStructs.dll</HintPath>
-      <Private>false</Private>
-    </Reference>
-    <Reference Include="InteropGenerator.Runtime">
-      <HintPath>$(DalamudLibPath)InteropGenerator.Runtime.dll</HintPath>
-      <Private>false</Private>
-    </Reference>
-    <Reference Include="Newtonsoft.Json">
-      <HintPath>$(DalamudLibPath)Newtonsoft.Json.dll</HintPath>
-      <Private>false</Private>
-    </Reference>
-  </ItemGroup>
-
-  <ItemGroup>
-    <!-- Generates the packaged manifest from CraftCast.json at build time. -->
-    <PackageReference Include="DalamudPackager" Version="11.0.0" />
-  </ItemGroup>
 
 </Project>

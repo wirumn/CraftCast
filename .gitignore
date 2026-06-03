@@ -3,20 +3,15 @@ bin/
 obj/
 
 # User-specific files
-*.user
 *.suo
+*.user
 *.userosscache
 *.sln.docstates
 
 # IDE folders
 .vs/
 .vscode/
+.idea/
 
 # Logs
 *.log
-
-# Dalamud specifically (if you ever copy them here)
-Dalamud.dll
-ImGui.NET.dll
-FFXIVClientStructs.dll
-Newtonsoft.Json.dll

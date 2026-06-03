@@ -1,24 +1,26 @@
-using System.Text.Json;
 using System.Text.Json.Serialization;
 
 namespace CraftCast.Networking;
 
-/// <summary>Outbound state broadcast: {"condition": "string", "step": 0}</summary>
+/// <summary>
+/// Outbound state broadcast. Sent on every meaningful change while a synthesis
+/// is active. Field names match what the paired userscript reads.
+/// </summary>
 public sealed class StatePayload
 {
-    [JsonPropertyName("condition")] public string Condition { get; set; } = string.Empty;
-    [JsonPropertyName("step")]      public int    Step      { get; set; }
+    [JsonPropertyName("condition")] public string Condition { get; init; } = string.Empty;
+    [JsonPropertyName("step")]      public int    Step      { get; init; }
 
-    [JsonPropertyName("craftsmanship")] public int Craftsmanship { get; set; }
-    [JsonPropertyName("control")]       public int Control       { get; set; }
-    [JsonPropertyName("cp")]            public int Cp            { get; set; }
+    [JsonPropertyName("craftsmanship")] public int Craftsmanship { get; init; }
+    [JsonPropertyName("control")]       public int Control       { get; init; }
+    [JsonPropertyName("cp")]            public int Cp            { get; init; }
 
-    [JsonPropertyName("difficulty")] public int Difficulty { get; set; }
-    [JsonPropertyName("durability")] public int Durability { get; set; }
-    [JsonPropertyName("maxQuality")] public int MaxQuality { get; set; }
+    [JsonPropertyName("difficulty")] public int Difficulty { get; init; }
+    [JsonPropertyName("durability")] public int Durability { get; init; }
+    [JsonPropertyName("maxQuality")] public int MaxQuality { get; init; }
 
-    [JsonPropertyName("currentProgress")] public int CurrentProgress { get; set; }
-    [JsonPropertyName("currentQuality")] public int CurrentQuality { get; set; }
+    [JsonPropertyName("currentProgress")] public int CurrentProgress { get; init; }
+    [JsonPropertyName("currentQuality")]  public int CurrentQuality  { get; init; }
 }
 
 /// <summary>
