@@ -134,6 +134,16 @@
 
     if (typeof msg.condition !== 'string') return;
     const step = (typeof msg.step === 'number' && Number.isFinite(msg.step)) ? msg.step : null;
+
+    // Auto-click Start button if we haven't started the solver yet
+    const startBtn = Array.from(document.querySelectorAll('button')).find(b => b.textContent.trim() === 'Start');
+    if (startBtn && step !== null && step > 0) {
+        startBtn.click();
+        log('auto-clicked Start button');
+        // Re-process this message in 500ms once the solver screen loads
+        setTimeout(() => handleIncoming(raw), 500);
+        return;
+    }
     
     let advanced = false;
     if (step !== null && lastProcessedStep !== null && step > lastProcessedStep) {
@@ -144,6 +154,7 @@
 
     const select = document.querySelector(CONFIG.conditionSelect);
     if (!select) return;
+    
     if (step !== null) lastProcessedStep = step;
 
     setReactiveValue(select, msg.condition);
