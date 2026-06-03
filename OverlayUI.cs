@@ -33,6 +33,22 @@ public sealed class OverlayUI : Window
 
     public override void Draw()
     {
+        var addonPtr = Plugin.GameGui.GetAddonByName("Synthesis", 1);
+        if (addonPtr != IntPtr.Zero)
+        {
+            unsafe
+            {
+                var synthWindow = (FFXIVClientStructs.FFXIV.Component.GUI.AtkUnitBase*)addonPtr.Address;
+                // Anchor just above the synthesis window
+                ImGui.SetWindowPos(new Vector2(synthWindow->X, synthWindow->Y - 60));
+            }
+        }
+        else
+        {
+            // If window isn't open, don't draw the overlay at all!
+            return;
+        }
+
         var (condition, step, action) = _state.Snapshot();
 
         ImGui.TextColored(new Vector4(0.40f, 0.90f, 1.00f, 1f), $"Condition   : {condition}");
