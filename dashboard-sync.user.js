@@ -233,8 +233,7 @@
   function findActiveConditionSelect() {
     const selects = findConditionSelects();
     if (!selects.length) return null;
-    const unfilled = selects.find((s) => !s.value);
-    return unfilled || selects[selects.length - 1];
+    return selects.find((s) => !s.value) || null;
   }
 
   function setInputByLabel(labelText, value) {
@@ -324,7 +323,6 @@
     if (step === null) return false;
     if (lastProcessedStep === null) return step > 1;
     if (step > lastProcessedStep) return true;
-    if (step === lastProcessedStep && typeof msg.cp === 'number' && msg.cp < lastCp) return true;
     return false;
   }
 
