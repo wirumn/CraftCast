@@ -77,6 +77,8 @@
   let lastProgress = 0;
   let lastQuality = 0;
   let lastCp = 0;
+  let stepStartProgress = 0;
+  let stepStartQuality = 0;
   let solverStarted = false; // per-craft guard so Start is clicked exactly once
 
   let suppressUntil = 0;
@@ -208,7 +210,9 @@
   // Thiria element lookups (all shadow-DOM aware)
   // ===========================================================================
   function findButtonsByText(text) {
-    return deepQueryAll('button, label').filter((b) => b.textContent.includes(text));
+    return deepQueryAll('button, label').filter((b) => 
+      b.textContent.includes(text) && !b.classList.contains('hidden') && !b.closest('.hidden')
+    );
   }
   function findButtonByExactText(text) {
     return deepQueryAll('button').find((b) => b.textContent.trim() === text) || null;
@@ -277,7 +281,11 @@
     applyCondition(msg, step);
     if (step !== null) lastProcessedStep = step;
 
-    if (advanced) scheduleStepAdvanceClick(msg);
+    if (advanced) {
+      stepStartProgress = lastProgress;
+      stepStartQuality = lastQuality;
+      scheduleStepAdvanceClick();
+    }
 
     trackState(msg);
   }
@@ -333,14 +341,14 @@
     log('applied condition', mapped, 'step', step);
   }
 
-  function scheduleStepAdvanceClick(msg) {
+  function scheduleStepAdvanceClick() {
     setTimeout(() => {
       const failBtns = findButtonsByText('Failure');
       const successBtns = findButtonsByText('Success');
 
       let target = null;
-      if (failBtns.length > 0 && typeof msg.currentProgress === 'number') {
-        const progressed = (msg.currentProgress > lastProgress) || (msg.currentQuality > lastQuality);
+      if (failBtns.length > 0 && typeof lastProgress === 'number') {
+        const progressed = (lastProgress > stepStartProgress) || (lastQuality > stepStartQuality);
         target = progressed ? successBtns.at(-1) : failBtns.at(-1);
       } else if (successBtns.length > 0) {
         target = successBtns.at(-1);
