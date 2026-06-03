@@ -185,15 +185,11 @@
       if (now < suppressUntil) { clearTimeout(suppressTimer); suppressTimer = setTimeout(evaluate, suppressUntil - now + 10); return; }
       
       let text = null;
-      // Find the active step by looking for the select dropdown
-      const activeSelect = document.querySelector(CONFIG.conditionSelect);
-      if (activeSelect) {
-         // Look for text in the parent container that starts with "Use "
-         const container = activeSelect.closest('div[class*="step"], div[class*="Step"], div') || activeSelect.parentElement;
-         if (container) {
-             const match = container.innerText.match(/Use\s+([^.]+)\./);
-             if (match) text = match[1].trim();
-         }
+      // The active step is always the last one added to the page.
+      // We look for the exact text Thiria generates: "Use [Action]. Then select the new condition..."
+      const matches = [...document.body.innerText.matchAll(/Use\s+([^.]+)\.\s+Then select the new condition/g)];
+      if (matches.length > 0) {
+          text = matches[matches.length - 1][1].trim();
       }
       
       if (text && text !== lastSentAction) sendAction(text);
