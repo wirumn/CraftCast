@@ -245,9 +245,15 @@
       } else {
          // Fallback for standard mode (macro list)
          const list = document.querySelector('#instruction-list, .instruction-list');
-         if (list && list.firstElementChild) {
-             const match = list.firstElementChild.innerText.match(/Use\s+([^.\n]+)/);
-             if (match) text = match[1].trim();
+         if (list) {
+             const items = Array.from(list.children);
+             // The game's step counter starts at 1 for the first action.
+             // If we are at step X, we want to extract the Xth item (index X - 1)
+             const stepIndex = (lastProcessedStep !== null && lastProcessedStep > 0) ? lastProcessedStep - 1 : 0;
+             if (stepIndex >= 0 && stepIndex < items.length) {
+                 const match = items[stepIndex].innerText.match(/Use\s+([^.\n]+)/);
+                 if (match) text = match[1].trim();
+             }
          }
       }
       
