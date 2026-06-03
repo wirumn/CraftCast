@@ -13,21 +13,15 @@ namespace CraftCast;
 /// pushes condition/step changes to the network layer. All pointer access here
 /// runs on the main game thread (the only thread where reading is safe).
 /// </summary>
-public sealed class CraftingMonitor
+public sealed class CraftingMonitor(WebSocketServerService server, SharedState state)
 {
-    private readonly WebSocketServerService _server;
-    private readonly SharedState _state;
+    private readonly WebSocketServerService _server = server;
+    private readonly SharedState _state = state;
 
     private bool _active;
     private string _lastCondition = string.Empty;
     private int _lastStep = -1;
     private int _lastCp = -1;
-
-    public CraftingMonitor(WebSocketServerService server, SharedState state)
-    {
-        _server = server;
-        _state = state;
-    }
 
     private DateTime _lastTick = DateTime.MinValue;
 
@@ -58,7 +52,8 @@ public sealed class CraftingMonitor
             var playerState = PlayerState.Instance();
             int craftsmanship = playerState != null ? playerState->Attributes[70] : 0;
             int control = playerState != null ? playerState->Attributes[71] : 0;
-            int cp = playerState != null ? playerState->Attributes[11] : 0;
+            int maxCp = playerState != null ? playerState->Attributes[11] : 0;
+            int cp = (int)(Plugin.ObjectTable.LocalPlayer?.CurrentCp ?? (uint)maxCp);
 
             var addonPtr = Plugin.GameGui.GetAddonByName("Synthesis", 1);
             var synthWindow = (FFXIVClientStructs.FFXIV.Component.GUI.AtkUnitBase*)addonPtr.Address;

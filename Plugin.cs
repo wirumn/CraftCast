@@ -14,6 +14,7 @@ public sealed class Plugin : IDalamudPlugin
     [PluginService] internal static IFramework Framework { get; private set; } = null!;
     [PluginService] public static IPluginLog Log { get; private set; } = null!;
     [PluginService] public static IGameGui GameGui { get; private set; } = null!;
+    [PluginService] public static IObjectTable ObjectTable { get; private set; } = null!;
 
     private const int WebSocketPort = 8014;
 
@@ -23,11 +24,13 @@ public sealed class Plugin : IDalamudPlugin
     private readonly CraftingMonitor _monitor;
     private readonly OverlayUI _overlay;
 
-    public Plugin(IDalamudPluginInterface pluginInterface, IFramework framework, IPluginLog log)
+    public Plugin(IDalamudPluginInterface pluginInterface, IFramework framework, IPluginLog log, IGameGui gameGui, IObjectTable objectTable)
     {
         PluginInterface = pluginInterface;
         Framework = framework;
         Log = log;
+        GameGui = gameGui;
+        ObjectTable = objectTable;
 
         // Networking loop is started once, on the background thread pool.
         _server = new WebSocketServerService(WebSocketPort);
