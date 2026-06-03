@@ -130,22 +130,7 @@
     // Auto-update recipe stats
     if (msg.difficulty) setInputByLabel('progress', msg.difficulty);
     if (msg.durability) setInputByLabel('durability', msg.durability);
-    if (msg.maxQuality) {
-        setInputByLabel('quality', msg.maxQuality);
-        
-        // Auto-select Rating based on recipe MaxQuality
-        // Endwalker Expert crafts usually have ~17300 Quality.
-        // Dawntrail Cosmic Standard crafts have ~24700 Quality.
-        const ratingSelect = Array.from(document.querySelectorAll('label')).find(l => l.textContent.includes('Rating'))?.nextElementSibling;
-        if (ratingSelect && ratingSelect.tagName === 'SELECT') {
-            const desiredRating = msg.maxQuality > 20000 ? 'standard' : 'expert';
-            const currentRating = ratingSelect.value;
-            if (currentRating !== desiredRating) {
-                setReactiveValue(ratingSelect, desiredRating);
-                log(`auto-switched rating from ${currentRating} to ${desiredRating} based on maxQuality ${msg.maxQuality}`);
-            }
-        }
-    }
+    if (msg.maxQuality) setInputByLabel('quality', msg.maxQuality);
 
     if (typeof msg.condition !== 'string') return;
     const step = (typeof msg.step === 'number' && Number.isFinite(msg.step)) ? msg.step : null;
@@ -161,8 +146,12 @@
     }
     
     let advanced = false;
-    if (step !== null && lastProcessedStep !== null && step > lastProcessedStep) {
-        advanced = true;
+    if (step !== null) {
+        if (lastProcessedStep === null && step > 1) {
+            advanced = true;
+        } else if (lastProcessedStep !== null && step > lastProcessedStep) {
+            advanced = true;
+        }
     }
 
     if (step !== null && step === lastProcessedStep) return;
