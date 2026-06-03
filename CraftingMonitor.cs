@@ -62,10 +62,13 @@ public sealed class CraftingMonitor
             var addonPtr = Plugin.GameGui.GetAddonByName("Synthesis", 1);
             var synthWindow = (FFXIVClientStructs.FFXIV.Component.GUI.AtkUnitBase*)addonPtr.Address;
             int maxProgress = 0, maxDurability = 0, maxQuality = 0;
+            int curProgress = 0, curQuality = 0;
             if (synthWindow != null && synthWindow->AtkValuesCount >= 18)
             {
+                curProgress = synthWindow->AtkValues[5].Int;
                 maxProgress = synthWindow->AtkValues[6].Int;
                 maxDurability = synthWindow->AtkValues[8].Int;
+                curQuality = synthWindow->AtkValues[16].Int;
                 maxQuality = synthWindow->AtkValues[17].Int;
             }
 
@@ -85,7 +88,9 @@ public sealed class CraftingMonitor
                 Cp = cp,
                 Difficulty = maxProgress,
                 Durability = maxDurability,
-                MaxQuality = maxQuality
+                MaxQuality = maxQuality,
+                CurrentProgress = curProgress,
+                CurrentQuality = curQuality
             };
 
             Plugin.Log.Information($"Sending State: Step={step}, Cond={condition}, Craft={craftsmanship}, Ctrl={control}, CP={cp}, Diff={maxProgress}, Dur={maxDurability}, Qual={maxQuality}");

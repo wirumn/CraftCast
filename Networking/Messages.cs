@@ -16,6 +16,9 @@ public sealed class StatePayload
     [JsonPropertyName("difficulty")] public int Difficulty { get; set; }
     [JsonPropertyName("durability")] public int Durability { get; set; }
     [JsonPropertyName("maxQuality")] public int MaxQuality { get; set; }
+
+    [JsonPropertyName("currentProgress")] public int CurrentProgress { get; set; }
+    [JsonPropertyName("currentQuality")] public int CurrentQuality { get; set; }
 }
 
 /// <summary>

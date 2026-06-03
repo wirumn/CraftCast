@@ -34,6 +34,8 @@
   let pendingAction = null;
   let lastSentAction = null;
   let lastProcessedStep = null;
+  let lastProgress = 0;
+  let lastQuality = 0;
   let suppressUntil = 0;
   let suppressTimer = null;
 
@@ -167,13 +169,29 @@
 
     if (advanced) {
       setTimeout(() => {
-        const btns = Array.from(document.querySelectorAll('button, label')).filter(b => b.textContent.includes('Success'));
-        if (btns.length > 0) {
-          const btn = btns[btns.length - 1]; // The active step is always the last one on the page
-          btn.click();
-          log('auto-clicked success');
+        const failBtns = Array.from(document.querySelectorAll('button, label')).filter(b => b.textContent.includes('Failure'));
+        const successBtns = Array.from(document.querySelectorAll('button, label')).filter(b => b.textContent.includes('Success'));
+        
+        let targetBtn = null;
+        // If Thiria offers a Failure button, check if our stats increased since the last step
+        if (failBtns.length > 0 && typeof msg.currentProgress === 'number') {
+            const hasProgressed = (msg.currentProgress > lastProgress) || (msg.currentQuality > lastQuality);
+            targetBtn = hasProgressed ? successBtns[successBtns.length - 1] : failBtns[failBtns.length - 1];
+        } else if (successBtns.length > 0) {
+            targetBtn = successBtns[successBtns.length - 1];
+        }
+
+        if (targetBtn) {
+            targetBtn.click();
+            log('auto-clicked button', targetBtn.textContent);
         }
       }, 50);
+    }
+    
+    // Update last known stats for the next step comparison
+    if (typeof msg.currentProgress === 'number') {
+        lastProgress = msg.currentProgress;
+        lastQuality = msg.currentQuality;
     }
   }
 
