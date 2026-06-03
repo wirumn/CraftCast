@@ -238,19 +238,22 @@
   function setInputByLabel(labelText, value) {
     if (value === undefined || value === null || value === '') return;
     const target = labelText.toLowerCase();
-    const label = deepQueryAll('label, .label').find((l) => {
+    const labels = deepQueryAll('label, .label').filter((l) => {
       const t = l.textContent.trim().toLowerCase();
       return t === target ||
              (target.length > 5 && t.startsWith(target.substring(0, CONFIG.labelPrefixLen)));
     });
-    if (!label) return;
 
-    const container = label.closest('.labelrow, .simplerow');
-    const input = container?.querySelector('input, select');
-    if (!input || String(input.value) === String(value)) return;
-
-    setReactiveValue(input, value);
-    log('auto-updated', labelText, '->', value);
+    for (const label of labels) {
+      const container = label.closest('.labelrow, .simplerow');
+      const input = container?.querySelector('input, select');
+      if (input) {
+        if (String(input.value) === String(value)) return;
+        setReactiveValue(input, value);
+        log('auto-updated', labelText, '->', value);
+        return;
+      }
+    }
   }
 
   // ===========================================================================
