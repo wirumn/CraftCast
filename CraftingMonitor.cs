@@ -82,6 +82,8 @@ public sealed class CraftingMonitor
                 MaxQuality = (int)handler->Quality
             };
 
+            Plugin.Log.Information($"Sending State: Step={step}, Cond={condition}, Craft={craftsmanship}, Ctrl={control}, CP={cp}, Diff={handler->Difficulty}, Dur={handler->Durability}, Qual={handler->Quality}");
+
             // Fire-and-forget: never block the game thread on socket I/O.
             _ = BroadcastSafelyAsync(payload);
         }

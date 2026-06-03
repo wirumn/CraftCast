@@ -102,7 +102,11 @@
   function setInputByLabel(labelText, value) {
     if (!value) return;
     const labels = Array.from(document.querySelectorAll('label, .label'));
-    const label = labels.find(l => l.textContent.trim().toLowerCase() === labelText.toLowerCase());
+    const labelTextLower = labelText.toLowerCase();
+    const label = labels.find(l => {
+      const text = l.textContent.trim().toLowerCase();
+      return text === labelTextLower || (labelTextLower.length > 5 && text.startsWith(labelTextLower.substring(0, 6)));
+    });
     if (!label) return;
     const container = label.closest('.labelrow, .simplerow');
     if (!container) return;
