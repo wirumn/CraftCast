@@ -89,16 +89,22 @@
   }
   function stopHeartbeat() { if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; } }
 
-  const nativeSelectValueSetter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value')?.set;
-  const nativeInputValueSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
-
   function setReactiveValue(el, value) {
     suppressUntil = Date.now() + CONFIG.suppressOutboundMs;
-    if (el.tagName === 'INPUT' && nativeInputValueSetter) { nativeInputValueSetter.call(el, value); }
-    else if (nativeSelectValueSetter) { nativeSelectValueSetter.call(el, value); }
-    else { el.value = value; }
+    el.focus();
+    if (el.tagName === 'SELECT') {
+        const options = Array.from(el.options);
+        const targetIndex = options.findIndex(o => o.value === value);
+        if (targetIndex !== -1) {
+            el.selectedIndex = targetIndex;
+            el.value = value;
+        }
+    } else {
+        el.value = value;
+    }
     el.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
     el.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+    el.blur();
   }
 
   function setInputByLabel(labelText, value) {
