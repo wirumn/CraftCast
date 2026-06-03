@@ -127,7 +127,10 @@
     if (msg.control) setInputByLabel('control', msg.control);
     if (msg.cp) setInputByLabel('cp', msg.cp);
 
-    // We no longer sync difficulty/durability/quality because FFXIVClientStructs offsets are returning garbage data for them.
+    // Auto-update recipe stats
+    if (msg.difficulty) setInputByLabel('progress', msg.difficulty);
+    if (msg.durability) setInputByLabel('durability', msg.durability);
+    if (msg.maxQuality) setInputByLabel('quality', msg.maxQuality);
 
     if (typeof msg.condition !== 'string') return;
     const step = (typeof msg.step === 'number' && Number.isFinite(msg.step)) ? msg.step : null;

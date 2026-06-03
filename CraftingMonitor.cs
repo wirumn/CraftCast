@@ -59,6 +59,16 @@ public sealed class CraftingMonitor
             int control = playerState != null ? playerState->Attributes[71] : 0;
             int cp = playerState != null ? playerState->Attributes[11] : 0;
 
+            var addonPtr = Plugin.GameGui.GetAddonByName("Synthesis", 1);
+            var synthWindow = (FFXIVClientStructs.FFXIV.Component.GUI.AtkUnitBase*)addonPtr.Address;
+            int maxProgress = 0, maxDurability = 0, maxQuality = 0;
+            if (synthWindow != null && synthWindow->AtkValuesCount >= 18)
+            {
+                maxProgress = synthWindow->AtkValues[6].Int;
+                maxDurability = synthWindow->AtkValues[8].Int;
+                maxQuality = synthWindow->AtkValues[17].Int;
+            }
+
             _active = true;
             if (condition == _lastCondition && step == _lastStep) return; // no change
 
@@ -68,17 +78,17 @@ public sealed class CraftingMonitor
 
             var payload = new StatePayload
             {
-                Condition = condition,
                 Step = step,
+                Condition = condition,
                 Craftsmanship = craftsmanship,
                 Control = control,
                 Cp = cp,
-                Difficulty = handler->Difficulty,
-                Durability = handler->Durability,
-                MaxQuality = (int)handler->Quality
+                Difficulty = maxProgress,
+                Durability = maxDurability,
+                MaxQuality = maxQuality
             };
 
-            Plugin.Log.Information($"Sending State: Step={step}, Cond={condition}, Craft={craftsmanship}, Ctrl={control}, CP={cp}, Diff={handler->Difficulty}, Dur={handler->Durability}, Qual={handler->Quality}");
+            Plugin.Log.Information($"Sending State: Step={step}, Cond={condition}, Craft={craftsmanship}, Ctrl={control}, CP={cp}, Diff={maxProgress}, Dur={maxDurability}, Qual={maxQuality}");
 
             // Fire-and-forget: never block the game thread on socket I/O.
             _ = BroadcastSafelyAsync(payload);
