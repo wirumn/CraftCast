@@ -12,7 +12,7 @@ namespace CraftCast;
 /// pushes condition/step changes to the network layer. All pointer access here
 /// runs on the main game thread (the only thread where reading is safe).
 /// </summary>
-public sealed unsafe class CraftingMonitor
+public sealed class CraftingMonitor
 {
     private readonly WebSocketServerService _server;
     private readonly SharedState _state;
@@ -27,10 +27,15 @@ public sealed unsafe class CraftingMonitor
         _state = state;
     }
 
-    public void OnFrameworkUpdate(IFramework framework)
+    private DateTime _lastTick = DateTime.MinValue;
+
+    public unsafe void OnFrameworkUpdate(IFramework framework)
     {
         try
         {
+            // Throttle to 10 ticks a second max to prevent any possibility of giga-lag
+            if ((DateTime.UtcNow - _lastTick).TotalMilliseconds < 100) return;
+            _lastTick = DateTime.UtcNow;
             var eventFramework = EventFramework.Instance();
             if (eventFramework == null) { Reset(); return; }
 

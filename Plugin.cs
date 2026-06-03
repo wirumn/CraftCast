@@ -22,10 +22,11 @@ public sealed class Plugin : IDalamudPlugin
     private readonly CraftingMonitor _monitor;
     private readonly OverlayUI _overlay;
 
-    public Plugin(IDalamudPluginInterface pluginInterface)
+    public Plugin(IDalamudPluginInterface pluginInterface, IFramework framework, IPluginLog log)
     {
-        // Populates the [PluginService] static properties above.
-        pluginInterface.Create<Plugin>();
+        PluginInterface = pluginInterface;
+        Framework = framework;
+        Log = log;
 
         // Networking loop is started once, on the background thread pool.
         _server = new WebSocketServerService(WebSocketPort);

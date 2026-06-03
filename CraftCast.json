@@ -7,7 +7,7 @@
   "ApplicableVersion": "any",
   "RepoUrl": "https://github.com/yourname/CraftCast",
   "Tags": [ "crafting", "overlay", "websocket" ],
-  "DalamudApiLevel": 11,
+  "DalamudApiLevel": 15,
   "LoadRequiredState": 0,
   "AssemblyVersion": "1.0.0.0",
   "IconUrl": ""
