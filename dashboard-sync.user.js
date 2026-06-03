@@ -169,16 +169,7 @@
         const select = selects[selects.length - 1]; // Always target the last (active) step's dropdown
         
         const conditionMap = {
-            'normal': 'Normal',
-            'good': 'Good',
-            'excellent': 'Excellent',
-            'poor': 'Poor',
-            'centered': 'Centered',
-            'sturdy': 'Sturdy',
-            'pliant': 'Pliant',
-            'malleable': 'Malleable',
-            'primed': 'Primed',
-            'goodomen': 'Good Omen'
+            'goodomen': 'goodOmen'
         };
         const mappedCondition = conditionMap[msg.condition] || msg.condition;
         
