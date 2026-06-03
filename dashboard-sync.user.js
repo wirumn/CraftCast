@@ -179,27 +179,32 @@
   let observer = null;
   let sendTimer = null;
 
-  function attachObserver(container) {
+  function attachObserver() {
     const evaluate = () => {
       const now = Date.now();
       if (now < suppressUntil) { clearTimeout(suppressTimer); suppressTimer = setTimeout(evaluate, suppressUntil - now + 10); return; }
-      const item = CONFIG.listItem ? container.querySelector(CONFIG.listItem) : container.firstElementChild;
-      const text = item ? item.textContent.trim() : null;
+      
+      let text = null;
+      // Find the active step by looking for the select dropdown
+      const activeSelect = document.querySelector(CONFIG.conditionSelect);
+      if (activeSelect) {
+         // Look for text in the parent container that starts with "Use "
+         const container = activeSelect.closest('div[class*="step"], div[class*="Step"], div') || activeSelect.parentElement;
+         if (container) {
+             const match = container.innerText.match(/Use\s+([^.]+)\./);
+             if (match) text = match[1].trim();
+         }
+      }
+      
       if (text && text !== lastSentAction) sendAction(text);
     };
     observer = new MutationObserver(() => { clearTimeout(sendTimer); sendTimer = setTimeout(evaluate, CONFIG.sendDebounceMs); });
-    observer.observe(container, { childList: true, subtree: true, characterData: true });
+    observer.observe(document.body, { childList: true, subtree: true, characterData: true });
     evaluate();
   }
 
   function waitForContainer() {
-    const existing = document.querySelector(CONFIG.listContainer);
-    if (existing) { attachObserver(existing); return; }
-    const bootstrap = new MutationObserver(() => {
-      const el = document.querySelector(CONFIG.listContainer);
-      if (el) { bootstrap.disconnect(); attachObserver(el); }
-    });
-    bootstrap.observe(document.documentElement, { childList: true, subtree: true });
+    attachObserver();
   }
 
   let statusEl = null;
