@@ -14,7 +14,6 @@
 
   const CONFIG = {
     wsUrl:            'ws://127.0.0.1:8014',
-    conditionSelect:  'select[x-bind-value="condition$"]',
     listContainer:    '#instruction-list',
     listItem:         ':scope > *',
     sendDebounceMs:   120,
@@ -163,7 +162,9 @@
         }
     }
 
-    const selects = Array.from(document.querySelectorAll(CONFIG.conditionSelect));
+    const allSelects = Array.from(document.querySelectorAll('select'));
+    const selects = allSelects.filter(s => s.options.length > 0 && Array.from(s.options).some(o => o.textContent.includes('Normal') || o.textContent.includes('Malleable') || o.textContent.includes('Good')));
+
     if (selects.length > 0) {
         const select = selects[selects.length - 1]; // Always target the last (active) step's dropdown
         
@@ -228,7 +229,8 @@
       
       let text = null;
       // In Expert/Relic mode, the active step is the one with the last "Success" button or condition dropdown.
-      const selects = Array.from(document.querySelectorAll(CONFIG.conditionSelect));
+      const allSelects = Array.from(document.querySelectorAll('select'));
+      const selects = allSelects.filter(s => s.options.length > 0 && Array.from(s.options).some(o => o.textContent.includes('Normal') || o.textContent.includes('Malleable') || o.textContent.includes('Good')));
       const buttons = Array.from(document.querySelectorAll('button, label')).filter(b => b.textContent.includes('Success'));
       
       let activeAnchor = null;
