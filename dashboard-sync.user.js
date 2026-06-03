@@ -156,8 +156,9 @@
 
     if (step !== null && step === lastProcessedStep) return;
 
-    const select = document.querySelector(CONFIG.conditionSelect);
-    if (!select) return;
+    const selects = Array.from(document.querySelectorAll(CONFIG.conditionSelect));
+    if (selects.length === 0) return;
+    const select = selects[selects.length - 1]; // Always target the last (active) step's dropdown
     
     if (step !== null) lastProcessedStep = step;
 
@@ -185,11 +186,33 @@
       if (now < suppressUntil) { clearTimeout(suppressTimer); suppressTimer = setTimeout(evaluate, suppressUntil - now + 10); return; }
       
       let text = null;
-      // The active step is always the last one added to the page.
-      // We look for the exact text Thiria generates: "Use [Action]. Then select the new condition..."
-      const matches = [...document.body.innerText.matchAll(/Use\s+([^.]+)\.\s+Then select the new condition/g)];
-      if (matches.length > 0) {
-          text = matches[matches.length - 1][1].trim();
+      // In Expert/Relic mode, the active step is the one with the last "Success" button or condition dropdown.
+      const selects = Array.from(document.querySelectorAll(CONFIG.conditionSelect));
+      const buttons = Array.from(document.querySelectorAll('button, label')).filter(b => b.textContent.includes('Success'));
+      
+      let activeAnchor = null;
+      if (selects.length > 0) activeAnchor = selects[selects.length - 1];
+      else if (buttons.length > 0) activeAnchor = buttons[buttons.length - 1];
+
+      if (activeAnchor) {
+         // Traverse up a few levels to find the container holding the text
+         let container = activeAnchor.parentElement;
+         for (let i = 0; i < 5 && container; i++) {
+             if (container.innerText && container.innerText.includes('Use ')) break;
+             container = container.parentElement;
+         }
+         
+         if (container) {
+             const match = container.innerText.match(/Use\s+([A-Za-z0-9\s]+)\./);
+             if (match) text = match[1].trim();
+         }
+      } else {
+         // Fallback for standard mode (macro list)
+         const list = document.querySelector('#instruction-list, .instruction-list');
+         if (list && list.firstElementChild) {
+             const match = list.firstElementChild.innerText.match(/Use\s+([A-Za-z0-9\s]+)/);
+             if (match) text = match[1].trim();
+         }
       }
       
       if (text && text !== lastSentAction) sendAction(text);
