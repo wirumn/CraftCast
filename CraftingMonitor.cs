@@ -2,6 +2,7 @@ using System;
 using System.Threading.Tasks;
 using Dalamud.Plugin.Services;
 using FFXIVClientStructs.FFXIV.Client.Game.Event;
+using FFXIVClientStructs.FFXIV.Client.Game.UI;
 using CraftCast.Networking;
 using CraftCast.State;
 
@@ -53,15 +54,36 @@ public sealed class CraftingMonitor
 
             var condition = Translate(conditionByte);
 
+            var playerState = PlayerState.Instance();
+            int craftsmanship = playerState != null ? playerState->Attributes[70] : 0;
+            int control = playerState != null ? playerState->Attributes[71] : 0;
+            int cp = playerState != null ? playerState->Attributes[11] : 0;
+
             _active = true;
             if (condition == _lastCondition && step == _lastStep) return; // no change
+
+            // RATE LIMIT to prevent main-thread lag if memory is garbage
+            if ((DateTime.UtcNow - _lastBroadcast).TotalMilliseconds < 100) return;
+            _lastBroadcast = DateTime.UtcNow;
 
             _lastCondition = condition;
             _lastStep = step;
             _state.SetState(condition, step);
 
+            var payload = new StatePayload
+            {
+                Condition = condition,
+                Step = step,
+                Craftsmanship = craftsmanship,
+                Control = control,
+                Cp = cp,
+                Difficulty = handler->Difficulty,
+                Durability = handler->Durability,
+                MaxQuality = (int)handler->Quality
+            };
+
             // Fire-and-forget: never block the game thread on socket I/O.
-            _ = BroadcastSafelyAsync(condition, step);
+            _ = BroadcastSafelyAsync(payload);
         }
         catch (Exception ex)
         {
@@ -69,12 +91,11 @@ public sealed class CraftingMonitor
         }
     }
 
-    private async Task BroadcastSafelyAsync(string condition, int step)
+    private async Task BroadcastSafelyAsync(StatePayload payload)
     {
         try
         {
-            await _server.BroadcastAsync(new StatePayload { Condition = condition, Step = step })
-                         .ConfigureAwait(false);
+            await _server.BroadcastAsync(payload).ConfigureAwait(false);
         }
         catch (Exception ex)
         {

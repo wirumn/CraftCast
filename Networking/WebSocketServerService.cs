@@ -24,7 +24,10 @@ public sealed class WebSocketServerService : IAsyncDisposable
     public event Action<string>? NextActionReceived;
 
     public WebSocketServerService(int port = 8014)
-        => _listener.Prefixes.Add($"http://localhost:{port}/");
+    {
+        _listener.Prefixes.Add($"http://localhost:{port}/");
+        _listener.Prefixes.Add($"http://127.0.0.1:{port}/");
+    }
 
     public void Start()
     {

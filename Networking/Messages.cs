@@ -6,8 +6,16 @@ namespace CraftCast.Networking;
 /// <summary>Outbound state broadcast: {"condition": "string", "step": 0}</summary>
 public sealed class StatePayload
 {
-    [JsonPropertyName("condition")] public string Condition { get; init; } = "idle";
-    [JsonPropertyName("step")]      public int    Step      { get; init; }
+    [JsonPropertyName("condition")] public string Condition { get; set; } = string.Empty;
+    [JsonPropertyName("step")]      public int    Step      { get; set; }
+
+    [JsonPropertyName("craftsmanship")] public int Craftsmanship { get; set; }
+    [JsonPropertyName("control")]       public int Control       { get; set; }
+    [JsonPropertyName("cp")]            public int Cp            { get; set; }
+
+    [JsonPropertyName("difficulty")] public int Difficulty { get; set; }
+    [JsonPropertyName("durability")] public int Durability { get; set; }
+    [JsonPropertyName("maxQuality")] public int MaxQuality { get; set; }
 }
 
 /// <summary>
