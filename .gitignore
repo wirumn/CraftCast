@@ -1,0 +1,22 @@
+# Build artifacts
+bin/
+obj/
+
+# User-specific files
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# IDE folders
+.vs/
+.vscode/
+
+# Logs
+*.log
+
+# Dalamud specifically (if you ever copy them here)
+Dalamud.dll
+ImGui.NET.dll
+FFXIVClientStructs.dll
+Newtonsoft.Json.dll
