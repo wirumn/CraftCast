@@ -44,6 +44,9 @@ public sealed class CraftStateController : IDisposable
     private int    _lastCp   = -1;
     private int    _lastProgress = -1;
     private int    _lastQuality = -1;
+    private int    _lastMaxProgress = -1;
+    private int    _lastMaxDurability = -1;
+    private int    _lastMaxQuality = -1;
     private DateTime _lastTick = DateTime.MinValue;
 
     // Snapshotted once per craft — these don't change mid-synthesis.
@@ -90,13 +93,16 @@ public sealed class CraftStateController : IDisposable
                 curQuality  = synth->AtkValues[AtkCurQuality].Int;
             }
 
-            if (condition == _lastCondition && step == _lastStep && cp == _lastCp && curProgress == _lastProgress && curQuality == _lastQuality) return; // no change
+            if (condition == _lastCondition && step == _lastStep && cp == _lastCp && curProgress == _lastProgress && curQuality == _lastQuality && _maxProgress == _lastMaxProgress && _maxDurability == _lastMaxDurability && _maxQuality == _lastMaxQuality) return; // no change
 
             _lastCondition = condition;
             _lastStep = step;
             _lastCp = cp;
             _lastProgress = curProgress;
             _lastQuality = curQuality;
+            _lastMaxProgress = _maxProgress;
+            _lastMaxDurability = _maxDurability;
+            _lastMaxQuality = _maxQuality;
             _state.SetState(condition, step);
 
             var payload = new StatePayload
@@ -163,6 +169,9 @@ public sealed class CraftStateController : IDisposable
         _lastCp = -1;
         _lastProgress = -1;
         _lastQuality = -1;
+        _lastMaxProgress = -1;
+        _lastMaxDurability = -1;
+        _lastMaxQuality = -1;
         _maxProgress = _maxDurability = _maxQuality = 0; // re-cache next craft
     }
 

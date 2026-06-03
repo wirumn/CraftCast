@@ -245,8 +245,21 @@
     });
 
     for (const label of labels) {
-      const container = label.closest('.labelrow, .simplerow');
-      const input = container?.querySelector('input, select');
+      let input = null;
+
+      if (label.htmlFor) input = document.getElementById(label.htmlFor) || deepQueryAll(`#${label.htmlFor}`)[0];
+      if (!input) input = label.querySelector('input, select');
+      if (!input) {
+        const container = label.closest('.labelrow, .simplerow, .field, .field-row');
+        if (container) input = container.querySelector('input, select');
+      }
+      if (!input && label.nextElementSibling && ['INPUT', 'SELECT'].includes(label.nextElementSibling.tagName)) {
+        input = label.nextElementSibling;
+      }
+      if (!input && label.parentElement) {
+        input = label.parentElement.querySelector('input, select');
+      }
+
       if (input) {
         if (String(input.value) === String(value)) return;
         setReactiveValue(input, value);
