@@ -88,7 +88,7 @@ public sealed class CraftStateController : IDisposable
             _state.SetState(condition, step);
 
             int curProgress = 0, curQuality = 0;
-            var synth = (AtkUnitBase*)Services.GameGui.GetAddonByName("Synthesis", 1);
+            var synth = (AtkUnitBase*)Services.GameGui.GetAddonByName("Synthesis", 1).Address;
             if (synth != null && synth->AtkValuesCount >= AtkMinValueCount)
             {
                 curProgress = synth->AtkValues[AtkCurProgress].Int;
@@ -132,7 +132,7 @@ public sealed class CraftStateController : IDisposable
             _maxCp         = ps->Attributes[AttrMaxCp];
         }
 
-        var synth = (AtkUnitBase*)Services.GameGui.GetAddonByName("Synthesis", 1);
+        var synth = (AtkUnitBase*)Services.GameGui.GetAddonByName("Synthesis", 1).Address;
         if (synth != null && synth->AtkValuesCount >= AtkMinValueCount)
         {
             _maxProgress   = synth->AtkValues[AtkMaxProgress].Int;
@@ -143,7 +143,7 @@ public sealed class CraftStateController : IDisposable
 
     private int ReadCurrentCp()
     {
-        var player = Services.ClientState.LocalPlayer;
+        var player = Services.ObjectTable.LocalPlayer;
         if (player != null) return (int)player.CurrentCp;
         // Player object briefly null — keep the last known value rather than
         // falsely reporting max CP to the solver.

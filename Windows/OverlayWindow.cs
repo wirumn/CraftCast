@@ -37,7 +37,7 @@ public sealed class OverlayWindow : Window
     /// <summary>Gate: only render while the Synthesis addon is visible.</summary>
     public override unsafe bool DrawConditions()
     {
-        var synth = (AtkUnitBase*)Services.GameGui.GetAddonByName("Synthesis", 1);
+        var synth = (AtkUnitBase*)Services.GameGui.GetAddonByName("Synthesis", 1).Address;
         return synth != null && synth->IsVisible;
     }
 
@@ -45,7 +45,7 @@ public sealed class OverlayWindow : Window
     {
         ImGui.SetNextWindowBgAlpha(0.55f);
 
-        var synth = (AtkUnitBase*)Services.GameGui.GetAddonByName("Synthesis", 1);
+        var synth = (AtkUnitBase*)Services.GameGui.GetAddonByName("Synthesis", 1).Address;
         if (synth != null)
             ImGui.SetNextWindowPos(new Vector2(synth->X, synth->Y - AnchorYOffset));
     }
