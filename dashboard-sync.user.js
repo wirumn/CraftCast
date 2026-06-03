@@ -36,6 +36,7 @@
   let lastProcessedStep = null;
   let lastProgress = 0;
   let lastQuality = 0;
+  let lastCp = 0;
   let suppressUntil = 0;
   let suppressTimer = null;
 
@@ -151,21 +152,20 @@
     if (step !== null) {
         if (lastProcessedStep === null && step > 1) {
             advanced = true;
-        } else if (lastProcessedStep !== null && step > lastProcessedStep) {
-            advanced = true;
+        } else if (lastProcessedStep !== null) {
+            if (step > lastProcessedStep) advanced = true;
+            else if (step === lastProcessedStep && typeof msg.cp === 'number' && msg.cp < lastCp) advanced = true;
         }
     }
 
-    if (step !== null && step === lastProcessedStep) return;
-
     const selects = Array.from(document.querySelectorAll(CONFIG.conditionSelect));
-    if (selects.length === 0) return;
-    const select = selects[selects.length - 1]; // Always target the last (active) step's dropdown
+    if (selects.length > 0) {
+        const select = selects[selects.length - 1]; // Always target the last (active) step's dropdown
+        setReactiveValue(select, msg.condition);
+        log('applied condition', msg.condition, 'step', step);
+    }
     
     if (step !== null) lastProcessedStep = step;
-
-    setReactiveValue(select, msg.condition);
-    log('applied condition', msg.condition, 'step', step);
 
     if (advanced) {
       setTimeout(() => {
@@ -192,6 +192,9 @@
     if (typeof msg.currentProgress === 'number') {
         lastProgress = msg.currentProgress;
         lastQuality = msg.currentQuality;
+    }
+    if (typeof msg.cp === 'number') {
+        lastCp = msg.cp;
     }
   }
 
