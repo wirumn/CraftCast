@@ -97,8 +97,8 @@
     if (el.tagName === 'INPUT' && nativeInputValueSetter) { nativeInputValueSetter.call(el, value); }
     else if (nativeSelectValueSetter) { nativeSelectValueSetter.call(el, value); }
     else { el.value = value; }
-    el.dispatchEvent(new Event('input', { bubbles: true }));
-    el.dispatchEvent(new Event('change', { bubbles: true }));
+    el.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+    el.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
   }
 
   function setInputByLabel(labelText, value) {
@@ -188,7 +188,8 @@
         // If Thiria offers a Failure button, check if our stats increased since the last step
         if (failBtns.length > 0 && typeof msg.currentProgress === 'number') {
             const hasProgressed = (msg.currentProgress > lastProgress) || (msg.currentQuality > lastQuality);
-            targetBtn = hasProgressed ? successBtns[successBtns.length - 1] : failBtns[failBtns.length - 1];
+            if (hasProgressed) targetBtn = successBtns[successBtns.length - 1];
+            else targetBtn = failBtns[failBtns.length - 1];
         } else if (successBtns.length > 0) {
             targetBtn = successBtns[successBtns.length - 1];
         }
@@ -197,7 +198,7 @@
             targetBtn.click();
             log('auto-clicked button', targetBtn.textContent);
         }
-      }, 50);
+      }, 500);
     }
     
     // Update last known stats for the next step comparison
