@@ -21,6 +21,7 @@ public sealed class CraftingMonitor
     private bool _active;
     private string _lastCondition = string.Empty;
     private int _lastStep = -1;
+    private int _lastCp = -1;
 
     public CraftingMonitor(WebSocketServerService server, SharedState state)
     {
@@ -73,10 +74,11 @@ public sealed class CraftingMonitor
             }
 
             _active = true;
-            if (condition == _lastCondition && step == _lastStep) return; // no change
+            if (condition == _lastCondition && step == _lastStep && cp == _lastCp) return; // no change
 
             _lastCondition = condition;
             _lastStep = step;
+            _lastCp = cp;
             _state.SetState(condition, step);
 
             var payload = new StatePayload
@@ -122,6 +124,7 @@ public sealed class CraftingMonitor
         _active = false;
         _lastCondition = string.Empty;
         _lastStep = -1; // forces a fresh broadcast when the next synthesis begins
+        _lastCp = -1;
     }
 
     /// <summary>
