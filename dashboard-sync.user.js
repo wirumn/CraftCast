@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Dashboard <-> Local Bridge
 // @namespace    https://github.com/wirumn/CraftCast
-// @version      3.1.1
+// @version      3.1.2
 // @description  Two-way sync between a local WebSocket app (127.0.0.1:8014) and the Thiria crafting solver.
 // @author       you
 // @match        https://thiria.com/expert/*
@@ -325,22 +325,8 @@
     const p = d.player || {};
     const r = d.recipe || {};
 
-    // Target inputs by their reactive binding — names are ambiguous (both the
-    // player and item panels have a "level" input, and DOM order is not
-    // guaranteed; positional selection once wrote the recipe level into the
-    // player field).
-    const bound = (binding) =>
-      deepQuery(`input[x-bind-value="${binding}"], select[x-bind-value="${binding}"]`);
-
-    setNamedInput(bound('player.level$'), p.level);
-    setNamedInput(bound('player.cp$') || deepQuery('input[name="cp"]'), p.cp);
-    setNamedInput(bound('player.craftsmanship$') || deepQuery('input[name="craftsmanship"]'), p.craftsmanship);
-    setNamedInput(bound('player.control$') || deepQuery('input[name="control"]'), p.control);
-
-    setNamedInput(bound('item.level$'), r.level);
-    setNamedInput(bound('item.durability$') || deepQuery('input[name="durability"]'), r.durability);
-    setNamedInput(bound('item.progress$') || deepQuery('input[name="progress"]'), r.progress);
-    setNamedInput(bound('item.quality$') || deepQuery('input[name="quality"]'), r.quality);
+    enforceStats(d);
+    logLevelFields();
 
     const rating = bound('item.profile$') || deepQuery('select[name="itemRating"]');
     if (rating && r.rating && rating.value !== r.rating) setReactiveValue(rating, r.rating);
@@ -364,6 +350,42 @@
 
     return !!(deepQuery('input[name="craftsmanship"]') &&
               p.level > 0 && p.craftsmanship > 0 && r.progress > 0);
+  }
+
+  // Target inputs by their reactive binding — names are ambiguous (both the
+  // player and item panels have a "level" input, and DOM order is not
+  // guaranteed; positional selection once wrote the recipe level into the
+  // player field).
+  const bound = (binding) =>
+    deepQuery(`input[x-bind-value="${binding}"], select[x-bind-value="${binding}"]`);
+
+  /**
+   * The numeric stat fields, written only when they differ from the payload.
+   * Runs on EVERY reconcile pass, not just at session start: Thiria restores
+   * form state from the URL bookmark on load/reset, which can resurrect stale
+   * values (e.g. a wrong player level saved by an old script version) after
+   * the one-time config already ran.
+   */
+  function enforceStats(d) {
+    const p = d.player || {};
+    const r = d.recipe || {};
+
+    setNamedInput(bound('player.level$'), p.level);
+    setNamedInput(bound('player.cp$') || deepQuery('input[name="cp"]'), p.cp);
+    setNamedInput(bound('player.craftsmanship$') || deepQuery('input[name="craftsmanship"]'), p.craftsmanship);
+    setNamedInput(bound('player.control$') || deepQuery('input[name="control"]'), p.control);
+
+    setNamedInput(bound('item.level$'), r.level);
+    setNamedInput(bound('item.durability$') || deepQuery('input[name="durability"]'), r.durability);
+    setNamedInput(bound('item.progress$') || deepQuery('input[name="progress"]'), r.progress);
+    setNamedInput(bound('item.quality$') || deepQuery('input[name="quality"]'), r.quality);
+  }
+
+  function logLevelFields() {
+    const pl = bound('player.level$');
+    const il = bound('item.level$');
+    log(`level check: Player panel=${pl ? pl.value : 'n/a'} (should be your character level), ` +
+        `Item panel=${il ? il.value : 'n/a'} (recipe rlvl, >100 is normal)`);
   }
 
   /**
@@ -440,6 +462,9 @@
       lastSentAction = null;
     }
     applyUnlockToggles(d);
+    // Heal stat drift on every pass (Thiria's bookmark restore can resurrect
+    // stale values mid-session); writes happen only when a field differs.
+    enforceStats(d);
 
     // Make sure the solver is running.
     if (stepRows().length === 0) {
