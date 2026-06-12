@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Dashboard <-> Local Bridge
 // @namespace    https://github.com/wirumn/CraftCast
-// @version      1.6.0
+// @version      2.0.0
 // @description  Two-way sync between a local WebSocket app (127.0.0.1:8014) and the Thiria crafting solver.
 // @author       you
 // @match        https://thiria.com/expert/*
@@ -13,29 +13,23 @@
   'use strict';
 
   // ===========================================================================
-  // Config — every selector / heuristic / tunable lives here so a Thiria markup
-  // change is a one-line fix instead of a hunt through the logic.
+  // Config
   // ===========================================================================
   const CONFIG = {
     wsUrl: 'ws://127.0.0.1:8014',
 
-    // Scraping fallback (standard macro mode).
     listContainerSelectors: '#instruction-list, .instruction-list',
 
-    // Canonical condition option VALUES Thiria uses (lowercase, camelCase for
-    // multi-word). A <select> is identified as the condition dropdown when its
-    // option values intersect this set — robust against text/label changes and
-    // immune to false-matching the action dropdown (which shares no keys).
+    // Canonical condition option VALUES Thiria uses.
     conditionKeys: [
       'normal', 'good', 'excellent', 'poor', 'centered', 'sturdy',
       'pliant', 'malleable', 'primed', 'goodOmen', 'robust',
     ],
 
     // Map plugin condition keys -> Thiria option values where they differ.
-    // Thiria option VALUES are lowercase even though their TEXT is Title Case.
     conditionMap: { goodomen: 'goodOmen' },
 
-    // Stat label text -> incoming payload field. (Only fires if the plugin sends them.)
+    // Stat label text -> incoming payload field.
     statFields: {
       craftsmanship: 'craftsmanship',
       control:       'control',
@@ -47,10 +41,13 @@
     sendDebounceMs:      120,
     suppressOutboundMs:  400,
     solverStartRetryMs:  500,
-    stepActionDelayMs:   500,
+
+    // Polling config for waiting on Thiria to process condition + enable button
+    stepPollIntervalMs:  80,
+    stepPollMaxAttempts: 40,   // 80ms * 40 = 3.2s max wait
+
     labelSearchMaxDepth: 5,
     labelPrefixLen:      6,
-    useFocusBlur:        true, // Thiria's framework intercepts via real focus/blur, NOT a native setter
 
     reconnect: { baseDelayMs: 1000, maxDelayMs: 30000, factor: 2, jitterRatio: 0.25 },
     heartbeat: { intervalMs: 15000, timeoutMs: 30000 },
@@ -78,18 +75,18 @@
   let lastCp = 0;
   let stepStartProgress = 0;
   let stepStartQuality = 0;
-  let solverStarted = false; // per-craft guard so Start is clicked exactly once
+  let solverStarted = false;
 
   let suppressUntil = 0;
   let suppressTimer = null;
 
+  // Guard against overlapping step-advance polls
+  let stepAdvanceInProgress = false;
+
   const suppressOutbound = () => { suppressUntil = Date.now() + CONFIG.suppressOutboundMs; };
 
   // ===========================================================================
-  // Shadow-DOM-aware queries.
-  // Thiria renders its solver inside (open) shadow roots, which plain
-  // document.querySelectorAll cannot see into — so element LOOKUP must walk
-  // shadow roots, not just rely on composed events crossing the boundary.
+  // Shadow-DOM-aware queries
   // ===========================================================================
   function deepQueryAll(selector, root = document) {
     const out = [];
@@ -175,7 +172,7 @@
   function stopHeartbeat() { if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; } }
 
   // ===========================================================================
-  // DOM writes (Thiria framework-safe: real focus/blur + bubbling composed events)
+  // DOM writes — framework-safe value setting
   // ===========================================================================
   function selectOption(select, value) {
     const v = String(value);
@@ -192,7 +189,7 @@
 
   function setReactiveValue(el, value) {
     suppressOutbound();
-    if (CONFIG.useFocusBlur) el.focus();
+    el.focus();
 
     if (el.tagName === 'SELECT') {
       if (!selectOption(el, value)) warn('no option matches', value, 'on', el);
@@ -202,37 +199,86 @@
 
     el.dispatchEvent(new Event('input',  { bubbles: true, composed: true }));
     el.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
-    if (CONFIG.useFocusBlur) el.blur();
+    el.blur();
   }
 
   // ===========================================================================
-  // Thiria element lookups (all shadow-DOM aware)
+  // Thiria element lookups (shadow-DOM aware)
   // ===========================================================================
-  function findButtonsByText(text) {
-    return deepQueryAll('button, label').filter((b) => 
-      b.textContent.includes(text) && !b.classList.contains('hidden') && !b.closest('.hidden')
-    );
-  }
-  function findButtonByExactText(text) {
-    return deepQueryAll('button').find((b) => b.textContent.trim() === text) || null;
-  }
+
   // A condition <select> is one whose option VALUES intersect the canonical
-  // condition keys. This distinguishes it from the action <select> (which has
-  // 34 unrelated values) and the settings dropdowns, regardless of label text.
-  // These selects only exist AFTER the solver is started.
+  // condition keys — distinguishes it from the action <select> and settings.
   const conditionKeySet = new Set(CONFIG.conditionKeys.map((k) => k.toLowerCase()));
-  function findConditionSelects() {
-    return deepQueryAll('select').filter((s) =>
-      s.options.length > 0 &&
-      Array.from(s.options).some((o) => o.value && conditionKeySet.has(o.value.toLowerCase())));
+
+  function isConditionSelect(s) {
+    return s.options.length > 0 &&
+      Array.from(s.options).some((o) => o.value && conditionKeySet.has(o.value.toLowerCase()));
   }
-  // With multiple condition selects present (one per step row), the active one
-  // is the next unfilled row — its placeholder ("Select the new condition.") is
-  // still selected, i.e. value is empty. Fall back to the last select.
+
+  function findConditionSelects() {
+    return deepQueryAll('select').filter(isConditionSelect);
+  }
+
+  /**
+   * Find the active (current) condition select.
+   *
+   * Thiria renders steps in column-reverse, so the LAST condition select in DOM
+   * order is the newest step. The active step is the one that hasn't been
+   * completed yet — its select either:
+   *   (a) has no value (placeholder still selected), OR
+   *   (b) has a value but its step row's Success button hasn't been clicked yet
+   *
+   * We try (a) first, fall back to (b) by taking the last select.
+   */
   function findActiveConditionSelect() {
     const selects = findConditionSelects();
     if (!selects.length) return null;
-    return selects.find((s) => !s.value) || null;
+
+    // Prefer the select with empty value (unfilled step)
+    const empty = selects.find((s) => !s.value);
+    if (empty) return empty;
+
+    // Fallback: the last select is the newest/active step
+    return selects[selects.length - 1];
+  }
+
+  /**
+   * Find the step container (cm-group) that contains the given element.
+   * This scopes button searches to the correct step row.
+   */
+  function findStepContainer(el) {
+    let node = el;
+    for (let i = 0; i < 10 && node; i++) {
+      if (node.tagName === 'CM-GROUP' || (node.classList && node.classList.contains('stepframe'))) {
+        return node;
+      }
+      node = node.parentElement;
+    }
+    return null;
+  }
+
+  /**
+   * Find Success/Failure buttons scoped to a specific step container.
+   * Falls back to page-wide search if container is null.
+   */
+  function findStepButtons(container) {
+    const scope = container || document;
+    const allButtons = container
+      ? Array.from(container.querySelectorAll('button, label'))
+      : deepQueryAll('button, label');
+
+    const successBtns = allButtons.filter((b) =>
+      b.textContent.includes('Success') && !b.classList.contains('hidden') && !b.closest('.hidden')
+    );
+    const failBtns = allButtons.filter((b) =>
+      b.textContent.includes('Failure') && !b.classList.contains('hidden') && !b.closest('.hidden')
+    );
+
+    return { successBtns, failBtns };
+  }
+
+  function findButtonByExactText(text) {
+    return deepQueryAll('button').find((b) => b.textContent.trim() === text) || null;
   }
 
   function setInputByLabel(labelText, value) {
@@ -284,24 +330,35 @@
     if (typeof msg.condition !== 'string') return;
     const step = (typeof msg.step === 'number' && Number.isFinite(msg.step)) ? msg.step : null;
 
+    log(`── incoming step=${step} cond=${msg.condition} prog=${msg.currentProgress} qual=${msg.currentQuality} cp=${msg.cp}`);
+
     detectCraftReset(step);
 
     if (step === 1 && lastProcessedStep === null) setInputByLabel('Rating', 'auto');
 
-    if (ensureSolverStarted(raw, step)) return; // Start clicked; reprocess after UI loads
+    if (ensureSolverStarted(raw, step)) return;
 
     const advanced = computeAdvanced(msg, step);
+    log(`   advanced=${advanced} lastProcessedStep=${lastProcessedStep}`);
 
-    applyCondition(msg, step);
-    if (step !== null) lastProcessedStep = step;
-
+    // Track progress BEFORE we update lastProcessedStep, so we can compare
+    // the previous step's end state with this step's start state
     if (advanced) {
       stepStartProgress = lastProgress;
       stepStartQuality = lastQuality;
-      scheduleStepAdvanceClick();
     }
 
+    // Update tracking state
     trackState(msg);
+    if (step !== null) lastProcessedStep = step;
+
+    // Apply condition to the active step's dropdown, then click Success/Failure
+    if (advanced) {
+      applyConditionAndAdvance(msg, step);
+    } else {
+      // Not a step advance — just update condition on current select
+      applyCondition(msg, step);
+    }
   }
 
   function applyStats(msg) {
@@ -310,7 +367,6 @@
     }
   }
 
-  // A step number lower than the last one means a fresh craft started.
   function detectCraftReset(step) {
     if (step === null || lastProcessedStep === null) return;
     if (step < lastProcessedStep) {
@@ -318,6 +374,7 @@
       solverStarted = false;
       lastProcessedStep = null;
       lastProgress = lastQuality = lastCp = 0;
+      stepAdvanceInProgress = false;
     }
   }
 
@@ -341,40 +398,6 @@
     return false;
   }
 
-  function applyCondition(msg, step) {
-    const select = findActiveConditionSelect();
-    if (!select) {
-      warn('no condition select found (shadow DOM? markup change?)');
-      setTargetNote('solver not found');
-      return;
-    }
-    setTargetNote('');
-    const mapped = CONFIG.conditionMap[msg.condition] || msg.condition;
-    setReactiveValue(select, mapped);
-    log('applied condition', mapped, 'step', step);
-  }
-
-  function scheduleStepAdvanceClick() {
-    setTimeout(() => {
-      const failBtns = findButtonsByText('Failure');
-      const successBtns = findButtonsByText('Success');
-
-      let target = null;
-      if (failBtns.length > 0 && typeof lastProgress === 'number') {
-        const progressed = (lastProgress > stepStartProgress) || (lastQuality > stepStartQuality);
-        target = progressed ? successBtns.at(-1) : failBtns.at(-1);
-      } else if (successBtns.length > 0) {
-        target = successBtns.at(-1);
-      }
-
-      if (target) {
-        suppressOutbound();
-        target.click();
-        log('auto-clicked', target.textContent.trim());
-      }
-    }, CONFIG.stepActionDelayMs);
-  }
-
   function trackState(msg) {
     if (typeof msg.currentProgress === 'number') {
       lastProgress = msg.currentProgress;
@@ -384,13 +407,123 @@
   }
 
   // ===========================================================================
+  // Core step advance logic — set condition, then poll until we can click
+  // ===========================================================================
+
+  /**
+   * Apply condition to the active select, then poll until Thiria's framework
+   * processes it and enables the Success/Failure button, then click it.
+   */
+  function applyConditionAndAdvance(msg, step) {
+    if (stepAdvanceInProgress) {
+      log('   step advance already in progress, skipping');
+      return;
+    }
+    stepAdvanceInProgress = true;
+
+    const mapped = CONFIG.conditionMap[msg.condition] || msg.condition;
+
+    // Determine if the action succeeded or failed based on progress/quality delta
+    const progressed = (lastProgress > stepStartProgress) || (lastQuality > stepStartQuality);
+    log(`   progressed=${progressed} (prog ${stepStartProgress}->${lastProgress}, qual ${stepStartQuality}->${lastQuality})`);
+
+    let attempts = 0;
+    const poll = () => {
+      attempts++;
+
+      // Find the active condition select
+      const select = findActiveConditionSelect();
+      if (!select) {
+        if (attempts < CONFIG.stepPollMaxAttempts) {
+          setTimeout(poll, CONFIG.stepPollIntervalMs);
+          return;
+        }
+        warn(`   gave up waiting for condition select after ${attempts} attempts`);
+        stepAdvanceInProgress = false;
+        setTargetNote('no condition select found');
+        return;
+      }
+      setTargetNote('');
+
+      // Set the condition value if not already set
+      const currentVal = select.value;
+      if (!currentVal || currentVal !== mapped) {
+        log(`   setting condition: "${currentVal}" -> "${mapped}" (attempt ${attempts})`);
+        setReactiveValue(select, mapped);
+      }
+
+      // Find the step container that owns this select
+      const container = findStepContainer(select);
+      const { successBtns, failBtns } = findStepButtons(container);
+
+      // Determine which button to click
+      let targetBtn = null;
+      if (failBtns.length > 0) {
+        // This step has Success + Failure (e.g., Rapid Synthesis)
+        targetBtn = progressed ? successBtns[successBtns.length - 1] : failBtns[failBtns.length - 1];
+      } else if (successBtns.length > 0) {
+        // This step has only Success (e.g., Final Appraisal, Byregot's Blessing)
+        targetBtn = successBtns[successBtns.length - 1];
+      }
+
+      if (!targetBtn) {
+        if (attempts < CONFIG.stepPollMaxAttempts) {
+          setTimeout(poll, CONFIG.stepPollIntervalMs);
+          return;
+        }
+        warn(`   gave up waiting for Success/Failure button after ${attempts} attempts`);
+        stepAdvanceInProgress = false;
+        return;
+      }
+
+      // Check if the button is enabled
+      if (targetBtn.disabled) {
+        if (attempts < CONFIG.stepPollMaxAttempts) {
+          setTimeout(poll, CONFIG.stepPollIntervalMs);
+          return;
+        }
+        warn(`   gave up: button still disabled after ${attempts} attempts`);
+        stepAdvanceInProgress = false;
+        return;
+      }
+
+      // Click it!
+      suppressOutbound();
+      targetBtn.click();
+      log(`   auto-clicked "${targetBtn.textContent.trim()}" for step ${step} (attempt ${attempts})`);
+      stepAdvanceInProgress = false;
+    };
+
+    // Start polling immediately
+    poll();
+  }
+
+  /**
+   * Apply condition without clicking Success/Failure (for non-advance updates).
+   */
+  function applyCondition(msg, step) {
+    const select = findActiveConditionSelect();
+    if (!select) {
+      log('   no condition select for non-advance update (normal if solver not started)');
+      return;
+    }
+    const mapped = CONFIG.conditionMap[msg.condition] || msg.condition;
+    if (select.value !== mapped) {
+      setReactiveValue(select, mapped);
+      log('   applied condition', mapped, 'step', step);
+    }
+  }
+
+  // ===========================================================================
   // Outgoing: scrape the active "Use X" instruction and send it back
   // ===========================================================================
   let observer = null;
   let sendTimer = null;
 
   function scrapeActiveAction() {
-    const anchor = findActiveConditionSelect() || findButtonsByText('Success').at(-1) || null;
+    const anchor = findActiveConditionSelect() ||
+      deepQueryAll('button, label').filter(b => b.textContent.includes('Success')).at(-1) ||
+      null;
 
     if (anchor) {
       let container = anchor.parentElement;
@@ -434,7 +567,7 @@
   }
 
   // ===========================================================================
-  // Status indicator (connection state + a "target health" note)
+  // Status indicator
   // ===========================================================================
   let statusEl = null;
   let currentStatus = { state: 'reconnecting', text: 'Connecting…' };
