@@ -32,6 +32,12 @@ The plugin is the single source of truth:
 - Actions executed by other plugins or macros also go through `UseAction`,
   so automated crafting syncs the same as manual play.
 
+One setting must be made by hand on the Thiria page: the **Relic** dropdown.
+The game gives no clean way to detect the equipped relic's phase, and a
+Cosmic 9+ relic changes the Good-condition quality bonus (×1.75 instead of
+×1.5) — if it's set wrong, Thiria under- or over-simulates quality on every
+Good-condition touch. The bridge never overwrites it, so set it once.
+
 The userscript is an idempotent reconciler: it converges the solver's step
 list to that history — resetting on a new session, correcting the action on a
 row when you deviated from the suggestion (via the row's edit pencil), setting

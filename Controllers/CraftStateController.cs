@@ -187,7 +187,15 @@ public sealed class CraftStateController : IDisposable
                     FinalizeSession();
                 }
             }
-            if (!_active) BeginSession(step);
+            // The handler lingers at step 0 while a craft initializes AND on
+            // the completion screen after one ends. Only step >= 1 is a live
+            // craft — beginning a session at step 0 would reset the solver and
+            // ingest end-screen garbage right after every craft.
+            if (!_active)
+            {
+                if (step < 1) return;
+                BeginSession(step);
+            }
 
             // The addon/player objects can lag a frame or two behind the
             // handler, so re-cache until everything essential reads non-zero.
