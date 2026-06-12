@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Dashboard <-> Local Bridge
 // @namespace    https://github.com/wirumn/CraftCast
-// @version      3.0.0
+// @version      3.0.1
 // @description  Two-way sync between a local WebSocket app (127.0.0.1:8014) and the Thiria crafting solver.
 // @author       you
 // @match        https://thiria.com/expert/*
@@ -252,10 +252,14 @@
     }) || null;
   }
 
+  // Thiria's x-items stamps each step inside an <x-item-host> wrapper, so the
+  // container's children are hosts, not the cm-group rows themselves.
   function stepRows() {
     const container = deepQuery('.stepsContainer');
     if (!container) return [];
-    return Array.from(container.children).filter((el) => el.tagName === 'CM-GROUP');
+    return Array.from(container.children)
+      .map((el) => (el.tagName === 'CM-GROUP' ? el : el.querySelector('cm-group')))
+      .filter(Boolean);
   }
 
   function rowIndex(row) {
@@ -590,7 +594,12 @@
     statusEl.querySelector('.label').textContent = currentStatus.text + (targetNote ? ` · ${targetNote}` : '');
   }
   function setStatus(state, text) { currentStatus = { state, text: text || state }; renderStatus(); }
-  function setTargetNote(note) { if (note !== targetNote) { targetNote = note || ''; renderStatus(); } }
+  function setTargetNote(note) {
+    if (note === targetNote) return;
+    targetNote = note || '';
+    if (targetNote) log('status:', targetNote); // surface silent waits in the console
+    renderStatus();
+  }
 
   // ===========================================================================
   // Lifecycle

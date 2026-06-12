@@ -189,9 +189,10 @@ public sealed class CraftStateController : IDisposable
             }
             if (!_active) BeginSession(step);
 
-            // The addon can lag a frame or two behind the handler, so re-cache
-            // the invariants until the recipe maxes read non-zero.
-            if (_maxProgress == 0) CacheInvariants();
+            // The addon/player objects can lag a frame or two behind the
+            // handler, so re-cache until everything essential reads non-zero.
+            if (_maxProgress == 0 || _craftsmanship == 0 || _playerLevel == 0)
+                CacheInvariants();
 
             ReadLiveValues(out var curProgress, out var curQuality, out var cp);
 
@@ -217,7 +218,9 @@ public sealed class CraftStateController : IDisposable
                 AppendEntry(name, step, condition, curProgress, curQuality, now);
 
             // 2. Step increments confirm in-flight step-consuming actions (FIFO).
-            if (step > _step && _step >= 0)
+            // The handler counts 0 -> 1 during craft initialization; only
+            // transitions from step 1 onwards correspond to performed actions.
+            if (step > _step && _step >= 1)
                 ConfirmStepAdvance(_step, step, condition, now);
 
             // 3. Resolve pending outcomes (free-action timers, success/failure deltas).
@@ -351,8 +354,9 @@ public sealed class CraftStateController : IDisposable
     private void ConfirmStepAdvance(int prevStep, int newStep, string condition, DateTime now)
     {
         // A lag hitch can deliver more than one step per tick; confirm one
-        // in-flight action (FIFO) per consumed step.
-        for (var s = prevStep; s < newStep; s++)
+        // in-flight action (FIFO) per consumed step. Steps below 1 are craft
+        // initialization, never actions.
+        for (var s = Math.Max(prevStep, 1); s < newStep; s++)
         {
             var pending = _history.FirstOrDefault(e => !e.IsFree && e.StepConfirmedAt is null && !e.Resolved);
             if (pending is not null)
