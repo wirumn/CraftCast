@@ -34,8 +34,10 @@ public sealed class CraftCastPlugin : IAsyncDalamudPlugin
         System.Server.NextActionReceived += OnNextActionReceived;
         System.Server.Start();
 
-        // The controller self-subscribes to Framework.Update in its constructor.
-        System.CraftState = new CraftStateController(System.Server, System.State);
+        // The tracker observes which actions the player actually performs;
+        // the controller self-subscribes to Framework.Update in its constructor.
+        System.ActionTracker = new CraftActionTracker();
+        System.CraftState = new CraftStateController(System.Server, System.State, System.ActionTracker);
 
         System.WindowSystem  = new WindowSystem("CraftCast");
         System.OverlayWindow = new OverlayWindow(System.State);
@@ -55,6 +57,7 @@ public sealed class CraftCastPlugin : IAsyncDalamudPlugin
         Services.PluginInterface.UiBuilder.Draw -= System.WindowSystem.Draw;
         System.WindowSystem.RemoveAllWindows();
         System.CraftState.Dispose();
+        System.ActionTracker.Dispose();
         System.Server.NextActionReceived -= OnNextActionReceived;
 
         // Bounded shutdown: a stuck socket must never hang game unload.

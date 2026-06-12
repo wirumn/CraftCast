@@ -24,6 +24,10 @@ public sealed class WebSocketServerService : IAsyncDisposable
     private readonly CancellationTokenSource _cts = new();
     private Task? _acceptLoop;
 
+    // Latest broadcast frame, replayed to clients that connect mid-craft so
+    // they never have to wait for the next state change to sync.
+    private volatile byte[]? _lastPayload;
+
     /// <summary>Raised on a background thread when a client sends next_action.</summary>
     public event Action<string>? NextActionReceived;
 
@@ -79,6 +83,10 @@ public sealed class WebSocketServerService : IAsyncDisposable
 
         var id = Guid.NewGuid();
         _clients[id] = socket;
+
+        // Bring the new client up to date immediately.
+        if (_lastPayload is { } snapshot)
+            await SendToAsync(socket, snapshot, ct).ConfigureAwait(false);
 
         var buffer = new byte[4096];
         try
@@ -157,11 +165,12 @@ public sealed class WebSocketServerService : IAsyncDisposable
     }
 
     /// <summary>Serializes state once and fans it out to every connected client.</summary>
-    public async Task BroadcastAsync(StatePayload payload, CancellationToken ct = default)
+    public async Task BroadcastAsync(CraftStatePayload payload, CancellationToken ct = default)
     {
-        if (_clients.IsEmpty) return;
+        var bytes = JsonSerializer.SerializeToUtf8Bytes(payload, WsJsonContext.Default.CraftStatePayload);
+        _lastPayload = bytes;
 
-        var bytes = JsonSerializer.SerializeToUtf8Bytes(payload, WsJsonContext.Default.StatePayload);
+        if (_clients.IsEmpty) return;
 
         await _sendGate.WaitAsync(ct).ConfigureAwait(false);
         try

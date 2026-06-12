@@ -1,13 +1,31 @@
 // ==UserScript==
 // @name         Dashboard <-> Local Bridge
 // @namespace    https://github.com/wirumn/CraftCast
-// @version      2.1.0
+// @version      3.0.0
 // @description  Two-way sync between a local WebSocket app (127.0.0.1:8014) and the Thiria crafting solver.
 // @author       you
 // @match        https://thiria.com/expert/*
 // @run-at       document-start
 // @grant        none
 // ==/UserScript==
+
+/*
+ * Architecture (v3): the plugin is the single source of truth. Every message
+ * carries the FULL action history of the current craft — which action the
+ * player actually used, the condition rolled afterwards, and success/failure.
+ * This script is a stateless-ish RECONCILER: on every message (and on relevant
+ * DOM changes) it converges Thiria's step list to that history:
+ *
+ *   - new session id        -> reset the solver, apply player/recipe config
+ *   - history entry i       -> Thiria step row i: fix the action (edit pencil)
+ *                              if the player deviated from the suggestion, set
+ *                              the rolled condition, click Success/Failure
+ *   - newest unfinished row -> scrape "Use X." and send it back as next_action
+ *
+ * Because reconciliation is idempotent and driven by the full document, a
+ * dropped frame, a slow solver, or a reconnect can no longer skip steps or
+ * confirm actions the player never performed.
+ */
 
 (function () {
   'use strict';
@@ -18,40 +36,21 @@
   const CONFIG = {
     wsUrl: 'ws://127.0.0.1:8014',
 
-    listContainerSelectors: '#instruction-list, .instruction-list',
-
-    // Canonical condition option VALUES Thiria uses.
-    conditionKeys: [
-      'normal', 'good', 'excellent', 'poor', 'centered', 'sturdy',
-      'pliant', 'malleable', 'primed', 'goodOmen', 'robust',
-    ],
-
-    // Map plugin condition keys -> Thiria option values where they differ.
-    conditionMap: { goodomen: 'goodOmen' },
-
-    // Stat label text -> incoming payload field.
-    statFields: {
-      craftsmanship: 'craftsmanship',
-      control:       'control',
-      progress:      'difficulty',
-      durability:    'durability',
-      quality:       'maxQuality',
-    },
-
-    sendDebounceMs:      120,
-    suppressOutboundMs:  400,
-    solverStartRetryMs:  500,
-
-    // Polling config for waiting on Thiria to process condition + enable button
-    stepPollIntervalMs:  80,
-    stepPollMaxAttempts: 40,   // 80ms * 40 = 3.2s max wait
-
-    labelSearchMaxDepth: 5,
-    labelPrefixLen:      6,
+    pollIntervalMs: 80,
+    pollTimeoutMs: 4000,
+    // Expert solves can take a while; give new rows more headroom.
+    solverRowTimeoutMs: 12000,
+    reconcileDebounceMs: 120,
+    repairAttemptsPerRow: 2,
 
     reconnect: { baseDelayMs: 1000, maxDelayMs: 30000, factor: 2, jitterRatio: 0.25 },
     heartbeat: { intervalMs: 15000, timeoutMs: 30000 },
   };
+
+  // Actions that require a player toggle in Thiria before they appear in the
+  // action list at all.
+  const MANIPULATION_ACTION = 'manipulation';
+  const SPECIALIST_ACTIONS = new Set(['heart and soul', 'careful observation', 'quick innovation']);
 
   const log  = (...a) => console.debug('[bridge]', ...a);
   const warn = (...a) => console.warn('[bridge]', ...a);
@@ -69,22 +68,13 @@
   let pendingAction = null;
   let lastSentAction = null;
 
-  let lastProcessedStep = null;
-  let lastProgress = 0;
-  let lastQuality = 0;
-  let lastCp = 0;
-  let lastCondition = '';
-  let stepStartProgress = 0;
-  let stepStartQuality = 0;
-  let solverStarted = false;
+  let doc = null;                 // latest state document from the plugin
+  let appliedSession = -1;        // session whose config/reset has been applied
+  const repairAttempts = new Map(); // row index -> repair count for this session
 
-  let suppressUntil = 0;
-  let suppressTimer = null;
-
-  // Guard against overlapping step-advance polls
-  let stepAdvanceInProgress = false;
-
-  const suppressOutbound = () => { suppressUntil = Date.now() + CONFIG.suppressOutboundMs; };
+  let reconciling = false;
+  let rerunRequested = false;
+  let reconcileTimer = null;
 
   // ===========================================================================
   // Shadow-DOM-aware queries
@@ -131,6 +121,9 @@
     socket.addEventListener('message', (ev) => handleIncoming(ev.data));
     socket.addEventListener('close', () => {
       stopHeartbeat();
+      // The last send may have died in the closing socket's buffer; forget it
+      // so the suggestion is re-sent after reconnecting.
+      lastSentAction = null;
       if (manualClose) setStatus('disconnected', 'Disconnected');
       else scheduleReconnect();
     });
@@ -172,9 +165,38 @@
   }
   function stopHeartbeat() { if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; } }
 
+  function handleIncoming(raw) {
+    let msg;
+    try { msg = JSON.parse(raw); } catch (_) { return; }
+    if (!msg || typeof msg !== 'object') return;
+
+    if (msg.type === 'pong') { lastPongAt = Date.now(); return; }
+    if (msg.type !== 'state') return;
+
+    doc = msg;
+    log(`── state: session=${msg.session} status=${msg.status} step=${msg.current?.step} ` +
+        `cond=${msg.current?.condition} history=${(msg.steps || []).length}`);
+    scheduleReconcile();
+  }
+
   // ===========================================================================
-  // DOM writes — framework-safe value setting
+  // Generic DOM helpers
   // ===========================================================================
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+  async function waitFor(fn, timeoutMs = CONFIG.pollTimeoutMs) {
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      let value = null;
+      try { value = fn(); } catch (_) { /* DOM in flux */ }
+      if (value) return value;
+      if (Date.now() >= deadline) return null;
+      await sleep(CONFIG.pollIntervalMs);
+    }
+  }
+
+  const isShown = (el) => !!el && !el.closest('.hidden');
+
   function selectOption(select, value) {
     const v = String(value);
     const vl = v.toLowerCase();
@@ -189,414 +211,349 @@
   }
 
   function setReactiveValue(el, value) {
-    suppressOutbound();
     el.focus();
-
     if (el.tagName === 'SELECT') {
-      if (!selectOption(el, value)) warn('no option matches', value, 'on', el);
+      if (!selectOption(el, value)) { warn('no option matches', value, 'on', el); return false; }
     } else {
       el.value = value;
     }
-
     el.dispatchEvent(new Event('input',  { bubbles: true, composed: true }));
     el.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
     el.blur();
-  }
-
-  // ===========================================================================
-  // Thiria element lookups (shadow-DOM aware)
-  // ===========================================================================
-
-  // A condition <select> is one whose option VALUES intersect the canonical
-  // condition keys — distinguishes it from the action <select> and settings.
-  const conditionKeySet = new Set(CONFIG.conditionKeys.map((k) => k.toLowerCase()));
-
-  function isConditionSelect(s) {
-    return s.options.length > 0 &&
-      Array.from(s.options).some((o) => o.value && conditionKeySet.has(o.value.toLowerCase()));
-  }
-
-  function findConditionSelects() {
-    return deepQueryAll('select').filter(isConditionSelect);
-  }
-
-  /**
-   * Find the active (current) condition select.
-   *
-   * Thiria renders steps in column-reverse, so the LAST condition select in DOM
-   * order is the newest step. The active step is the one that hasn't been
-   * completed yet — its select either:
-   *   (a) has no value (placeholder still selected), OR
-   *   (b) has a value but its step row's Success button hasn't been clicked yet
-   *
-   * We try (a) first, fall back to (b) by taking the last select.
-   */
-  function findActiveConditionSelect() {
-    const selects = findConditionSelects();
-    if (!selects.length) return null;
-
-    // Prefer the select with empty value (unfilled step)
-    const empty = selects.find((s) => !s.value);
-    if (empty) return empty;
-
-    // Fallback: the last select is the newest/active step
-    return selects[selects.length - 1];
-  }
-
-  /**
-   * Find the step container (cm-group) that contains the given element.
-   * This scopes button searches to the correct step row.
-   */
-  function findStepContainer(el) {
-    let node = el;
-    for (let i = 0; i < 10 && node; i++) {
-      if (node.tagName === 'CM-GROUP' || (node.classList && node.classList.contains('stepframe'))) {
-        return node;
-      }
-      node = node.parentElement;
-    }
-    return null;
-  }
-
-  /**
-   * Find Success/Failure buttons scoped to a specific step container.
-   * Falls back to page-wide search if container is null.
-   */
-  function findStepButtons(container) {
-    const scope = container || document;
-    const allButtons = container
-      ? Array.from(container.querySelectorAll('button, label'))
-      : deepQueryAll('button, label');
-
-    const successBtns = allButtons.filter((b) =>
-      b.textContent.includes('Success') && !b.classList.contains('hidden') && !b.closest('.hidden')
-    );
-    const failBtns = allButtons.filter((b) =>
-      b.textContent.includes('Failure') && !b.classList.contains('hidden') && !b.closest('.hidden')
-    );
-
-    return { successBtns, failBtns };
-  }
-
-  function findButtonByExactText(text) {
-    return deepQueryAll('button').find((b) => b.textContent.trim() === text) || null;
-  }
-
-  function setInputByLabel(labelText, value) {
-    if (value === undefined || value === null || value === '') return;
-    const target = labelText.toLowerCase();
-    const labels = deepQueryAll('label, .label').filter((l) => {
-      const t = l.textContent.trim().toLowerCase();
-      return t === target ||
-             (target.length > 5 && t.startsWith(target.substring(0, CONFIG.labelPrefixLen)));
-    });
-
-    for (const label of labels) {
-      let input = null;
-
-      if (label.htmlFor) input = document.getElementById(label.htmlFor) || deepQueryAll(`#${label.htmlFor}`)[0];
-      if (!input) input = label.querySelector('input, select');
-      if (!input) {
-        const container = label.closest('.labelrow, .simplerow, .field, .field-row');
-        if (container) input = container.querySelector('input, select');
-      }
-      if (!input && label.nextElementSibling && ['INPUT', 'SELECT'].includes(label.nextElementSibling.tagName)) {
-        input = label.nextElementSibling;
-      }
-      if (!input && label.parentElement) {
-        input = label.parentElement.querySelector('input, select');
-      }
-
-      if (input) {
-        if (String(input.value) === String(value)) return;
-        setReactiveValue(input, value);
-        log('auto-updated', labelText, '->', value);
-        return;
-      }
-    }
-  }
-
-  // ===========================================================================
-  // Incoming pipeline
-  // ===========================================================================
-  function handleIncoming(raw) {
-    let msg;
-    try { msg = JSON.parse(raw); } catch (_) { return; }
-    if (!msg || typeof msg !== 'object') return;
-
-    if (msg.type === 'pong') { lastPongAt = Date.now(); return; }
-
-    applyStats(msg);
-
-    if (typeof msg.condition !== 'string') return;
-    const step = (typeof msg.step === 'number' && Number.isFinite(msg.step)) ? msg.step : null;
-
-    log(`── incoming step=${step} cond=${msg.condition} prog=${msg.currentProgress} qual=${msg.currentQuality} cp=${msg.cp}`);
-
-    detectCraftReset(step);
-
-    if (step === 1 && lastProcessedStep === null) setInputByLabel('Rating', 'auto');
-
-    if (ensureSolverStarted(raw, step)) return;
-
-    const advanced = computeAdvanced(msg, step);
-    log(`   advanced=${advanced} lastProcessedStep=${lastProcessedStep}`);
-
-    // Track progress BEFORE we update lastProcessedStep, so we can compare
-    // the previous step's end state with this step's start state
-    if (advanced) {
-      stepStartProgress = lastProgress;
-      stepStartQuality = lastQuality;
-    }
-
-    // Update tracking state
-    trackState(msg);
-    if (step !== null) lastProcessedStep = step;
-
-    // Apply condition to the active step's dropdown, then click Success/Failure
-    if (advanced) {
-      applyConditionAndAdvance(msg, step);
-    } else {
-      // Not a step advance — just update condition on current select
-      applyCondition(msg, step);
-    }
-  }
-
-  function applyStats(msg) {
-    for (const [label, field] of Object.entries(CONFIG.statFields)) {
-      if (msg[field] !== undefined) setInputByLabel(label, msg[field]);
-    }
-  }
-
-  function detectCraftReset(step) {
-    if (step === null || lastProcessedStep === null) return;
-    if (step < lastProcessedStep) {
-      log('new craft detected — resetting per-craft state');
-      solverStarted = false;
-      lastProcessedStep = null;
-      lastProgress = lastQuality = lastCp = 0;
-      lastCondition = '';
-      stepAdvanceInProgress = false;
-
-      const resetBtn = findButtonByExactText('Reset') || findButtonByExactText('Start');
-      if (resetBtn) {
-        suppressOutbound();
-        resetBtn.click();
-        log('auto-clicked Reset for new craft');
-      }
-    }
-  }
-
-  function ensureSolverStarted(raw, step) {
-    if (solverStarted || step === null || step <= 0) return false;
-    const startBtn = findButtonByExactText('Start');
-    if (!startBtn) return false;
-
-    suppressOutbound();
-    startBtn.click();
-    solverStarted = true;
-    log('auto-clicked Start');
-    setTimeout(() => handleIncoming(raw), CONFIG.solverStartRetryMs);
     return true;
   }
 
-  function computeAdvanced(msg, step) {
-    if (step === null) return false;
-    if (lastProcessedStep === null) return step > 1;
-    if (step > lastProcessedStep) return true;
-
-    // Check for "free" actions that don't increment step (e.g., Final Appraisal, Heart & Soul)
-    if (step === lastProcessedStep) {
-      const select = findActiveConditionSelect();
-      if (select) {
-        const container = findStepContainer(select);
-        const text = (container?.textContent || '').toLowerCase();
-        
-        if (text.includes('final appraisal') && typeof msg.cp === 'number' && msg.cp < lastCp) return true;
-        if (text.includes('heart and soul') && typeof msg.condition === 'string' && msg.condition !== lastCondition && msg.condition !== 'normal') return true;
-      }
-    }
-
-    return false;
-  }
-
-  function trackState(msg) {
-    if (typeof msg.currentProgress === 'number') {
-      lastProgress = msg.currentProgress;
-      lastQuality = msg.currentQuality;
-    }
-    if (typeof msg.cp === 'number') lastCp = msg.cp;
-    if (typeof msg.condition === 'string') lastCondition = msg.condition;
-  }
-
-  // ===========================================================================
-  // Core step advance logic — set condition, then poll until we can click
-  // ===========================================================================
-
   /**
-   * Apply condition to the active select, then poll until Thiria's framework
-   * processes it and enables the Success/Failure button, then click it.
+   * Select an action by its display name ("Muscle Memory"). Thiria option
+   * values are camelCase keys, option text is the display name — match both.
    */
-  function applyConditionAndAdvance(msg, step) {
-    if (stepAdvanceInProgress) {
-      log('   step advance already in progress, skipping');
-      return;
-    }
-    stepAdvanceInProgress = true;
-
-    const mapped = CONFIG.conditionMap[msg.condition] || msg.condition;
-
-    let attempts = 0;
-    const poll = () => {
-      attempts++;
-
-      // Evaluate if the action succeeded based on progress/quality delta.
-      // We do this inside the poll loop to allow FFXIV UI animation to catch up to the step increment.
-      const progressed = (lastProgress > stepStartProgress) || (lastQuality > stepStartQuality);
-
-      // Find the active condition select
-      const select = findActiveConditionSelect();
-      if (!select) {
-        if (attempts < CONFIG.stepPollMaxAttempts) {
-          setTimeout(poll, CONFIG.stepPollIntervalMs);
-          return;
-        }
-        warn(`   gave up waiting for condition select after ${attempts} attempts`);
-        stepAdvanceInProgress = false;
-        setTargetNote('no condition select found');
-        return;
-      }
-      setTargetNote('');
-
-      // Set the condition value if not already set
-      const currentVal = select.value;
-      if (!currentVal || currentVal !== mapped) {
-        log(`   setting condition: "${currentVal}" -> "${mapped}" (attempt ${attempts})`);
-        setReactiveValue(select, mapped);
-      }
-
-      // Find the step container that owns this select
-      const container = findStepContainer(select);
-      const { successBtns, failBtns } = findStepButtons(container);
-
-      // Determine which button to click
-      let targetBtn = null;
-      if (failBtns.length > 0) {
-        // This step has Success + Failure (e.g., Rapid Synthesis)
-        if (progressed) {
-          targetBtn = successBtns[successBtns.length - 1];
-        } else {
-          // It looks like a failure, but FFXIV step increments before UI bars update.
-          // Wait at least ~800ms (10 attempts) for Quality/Progress to update from the game.
-          if (attempts < 10 && attempts < CONFIG.stepPollMaxAttempts) {
-            setTimeout(poll, CONFIG.stepPollIntervalMs);
-            return;
-          }
-          targetBtn = failBtns[failBtns.length - 1];
-        }
-      } else if (successBtns.length > 0) {
-        // This step has only Success (e.g., Final Appraisal, Byregot's Blessing)
-        targetBtn = successBtns[successBtns.length - 1];
-      }
-
-      if (!targetBtn) {
-        if (attempts < CONFIG.stepPollMaxAttempts) {
-          setTimeout(poll, CONFIG.stepPollIntervalMs);
-          return;
-        }
-        warn(`   gave up waiting for Success/Failure button after ${attempts} attempts`);
-        stepAdvanceInProgress = false;
-        return;
-      }
-
-      // Check if the button is enabled
-      if (targetBtn.disabled) {
-        if (attempts < CONFIG.stepPollMaxAttempts) {
-          setTimeout(poll, CONFIG.stepPollIntervalMs);
-          return;
-        }
-        warn(`   gave up: button still disabled after ${attempts} attempts`);
-        stepAdvanceInProgress = false;
-        return;
-      }
-
-      // Click it!
-      suppressOutbound();
-      targetBtn.click();
-      log(`   auto-clicked "${targetBtn.textContent.trim()}" for step ${step} (attempt ${attempts})`);
-      stepAdvanceInProgress = false;
-    };
-
-    // Start polling immediately
-    poll();
+  function setSelectByActionName(select, name) {
+    const wanted = name.trim().toLowerCase();
+    const wantedKey = wanted.replace(/[^a-z0-9]/g, '');
+    const opt = Array.from(select.options).find((o) =>
+      o.textContent.trim().toLowerCase() === wanted ||
+      o.value.toLowerCase() === wantedKey);
+    if (!opt) return false;
+    return setReactiveValue(select, opt.value);
   }
 
-  /**
-   * Apply condition without clicking Success/Failure (for non-advance updates).
-   */
-  function applyCondition(msg, step) {
-    const select = findActiveConditionSelect();
-    if (!select) {
-      log('   no condition select for non-advance update (normal if solver not started)');
-      return;
-    }
-    const mapped = CONFIG.conditionMap[msg.condition] || msg.condition;
-    if (select.value !== mapped) {
-      setReactiveValue(select, mapped);
-      log('   applied condition', mapped, 'step', step);
-    }
+  const sameName = (a, b) =>
+    (a || '').trim().toLowerCase() === (b || '').trim().toLowerCase();
+
+  // ===========================================================================
+  // Thiria accessors
+  // ===========================================================================
+
+  // The Start/Reset button: label is "Start" before the solver runs, "Reset" after.
+  function startResetButton() {
+    return deepQueryAll('button').find((b) => {
+      const t = b.textContent.trim();
+      return t === 'Start' || t === 'Reset';
+    }) || null;
   }
 
-  // ===========================================================================
-  // Outgoing: scrape the active "Use X" instruction and send it back
-  // ===========================================================================
-  let observer = null;
-  let sendTimer = null;
+  function stepRows() {
+    const container = deepQuery('.stepsContainer');
+    if (!container) return [];
+    return Array.from(container.children).filter((el) => el.tagName === 'CM-GROUP');
+  }
 
-  function scrapeActiveAction() {
-    const anchor = findActiveConditionSelect() ||
-      deepQueryAll('button, label').filter(b => b.textContent.includes('Success')).at(-1) ||
-      null;
+  function rowIndex(row) {
+    const header = row.querySelector('[slot="header"]');
+    const m = header && header.textContent.match(/#\s*(\d+)/);
+    return m ? parseInt(m[1], 10) : -1;
+  }
 
-    if (anchor) {
-      let container = anchor.parentElement;
-      for (let i = 0; i < CONFIG.labelSearchMaxDepth && container; i++) {
-        if (container.innerText && container.innerText.includes('Use ')) break;
-        container = container.parentElement;
-      }
-      const match = container?.innerText.match(/Use\s+([^.]+)\./);
-      if (match) return match[1].trim();
-    }
+  function rowByIndex(n) {
+    const rows = stepRows();
+    return rows.find((r) => rowIndex(r) === n) || rows[n - 1] || null;
+  }
 
-    // Fallback: standard macro list, indexed by current step.
-    const list = deepQuery(CONFIG.listContainerSelectors);
-    if (list) {
-      const items = Array.from(list.children);
-      const idx = (lastProcessedStep !== null && lastProcessedStep > 0) ? lastProcessedStep - 1 : 0;
-      const match = items[idx]?.innerText.match(/Use\s+([^.\n]+)/);
-      if (match) return match[1].trim();
-    }
+  // "Use <span>NAME</span>." — the inner span carries the action name.
+  function rowActionName(row) {
+    const span = row.querySelector('.steptext .bold span');
+    return span ? span.textContent.trim() : '';
+  }
+
+  function actionSelect(row) {
+    return row.querySelector('select[xu-action-options]') ||
+      Array.from(row.querySelectorAll('select'))
+        .find((s) => !s.querySelector('option[value="normal"]')) || null;
+  }
+
+  function conditionSelect(row) {
+    return Array.from(row.querySelectorAll('select'))
+      .find((s) => s.querySelector('option[value="normal"]')) || null;
+  }
+
+  function resultButton(row, text) {
+    return Array.from(row.querySelectorAll('button.result'))
+      .find((b) => b.textContent.includes(text)) || null;
+  }
+
+  // 'success' | 'failure' | null — Thiria marks the clicked button with a class.
+  function rowResult(row) {
+    if (resultButton(row, 'Success')?.classList.contains('success')) return 'success';
+    if (resultButton(row, 'Failure')?.classList.contains('failure')) return 'failure';
     return null;
   }
+  const rowFinished = (row) => rowResult(row) !== null;
 
-  function attachObserver() {
-    const evaluate = () => {
-      const now = Date.now();
-      if (now < suppressUntil) {
-        clearTimeout(suppressTimer);
-        suppressTimer = setTimeout(evaluate, suppressUntil - now + 10);
+  // ===========================================================================
+  // Solver configuration (player stats + recipe)
+  // ===========================================================================
+  function setNamedInput(el, value) {
+    if (!el || value === undefined || value === null || value === '' || value === 0) return;
+    if (String(el.value) === String(value)) return;
+    setReactiveValue(el, value);
+    log('config', el.name || el.id, '->', value);
+  }
+
+  /**
+   * Returns true only when the form existed and the document carried real
+   * values — early broadcasts of a session can have zeroed stats while the
+   * plugin's addon reads settle, and the page itself may not be built yet.
+   * The caller retries until this succeeds.
+   */
+  function applyConfig(d) {
+    const p = d.player || {};
+    const r = d.recipe || {};
+
+    // Both the player and item panels label their level input "level";
+    // they appear in template order: player first, item second.
+    const levels = deepQueryAll('input[name="level"]');
+    setNamedInput(levels[0], p.level);
+    setNamedInput(deepQuery('input[name="cp"]'), p.cp);
+    setNamedInput(deepQuery('input[name="craftsmanship"]'), p.craftsmanship);
+    setNamedInput(deepQuery('input[name="control"]'), p.control);
+
+    setNamedInput(levels[1], r.level);
+    setNamedInput(deepQuery('input[name="durability"]'), r.durability);
+    setNamedInput(deepQuery('input[name="progress"]'), r.progress);
+    setNamedInput(deepQuery('input[name="quality"]'), r.quality);
+
+    const rating = deepQuery('select[name="itemRating"]');
+    if (rating && r.rating && rating.value !== r.rating) setReactiveValue(rating, r.rating);
+
+    return !!(deepQuery('input[name="craftsmanship"]') && p.craftsmanship > 0 && r.progress > 0);
+  }
+
+  /**
+   * If the player used Manipulation or a specialist action, the matching
+   * Thiria toggle must be "Allowed" or the action won't exist in the action
+   * list. The toggles are <select>s with true/false options inside a named
+   * wrapper div. Run BEFORE driving rows: changing one recalculates and
+   * replaces the active row.
+   */
+  function applyUnlockToggles(d) {
+    const used = (d.steps || []).map((s) => (s.action || '').toLowerCase());
+    const ensure = (name) => {
+      const wrap = deepQuery(`[name="${name}"]`);
+      const sel = wrap && (wrap.tagName === 'SELECT' ? wrap : wrap.querySelector('select'));
+      if (sel && sel.value !== 'true') {
+        setReactiveValue(sel, 'true');
+        log('enabled toggle', name);
+      }
+    };
+    if (used.includes(MANIPULATION_ACTION)) ensure('playerManipulation');
+    if (used.some((a) => SPECIALIST_ACTIONS.has(a))) ensure('playerSpecialist');
+  }
+
+  // ===========================================================================
+  // Reconciler
+  // ===========================================================================
+  function scheduleReconcile() {
+    clearTimeout(reconcileTimer);
+    reconcileTimer = setTimeout(reconcile, CONFIG.reconcileDebounceMs);
+  }
+
+  async function reconcile() {
+    if (reconciling) { rerunRequested = true; return; }
+    reconciling = true;
+    try {
+      await reconcileOnce();
+    } catch (e) {
+      warn('reconcile failed', e);
+    } finally {
+      reconciling = false;
+      if (rerunRequested) { rerunRequested = false; scheduleReconcile(); }
+    }
+  }
+
+  async function reconcileOnce() {
+    const d = doc;
+    if (!d) return;
+
+    if (!d.fromStart) {
+      // Plugin attached mid-craft: history is incomplete, driving the solver
+      // would fabricate steps. Stay hands-off, still surface the suggestion.
+      setTargetNote('attached mid-craft — auto-sync off');
+      publishSuggestion();
+      return;
+    }
+
+    // New craft: reset the solver and push fresh config.
+    if (d.session !== appliedSession) {
+      const btn = startResetButton();
+      if (btn && btn.textContent.trim() === 'Reset' && !btn.disabled) {
+        btn.click();
+        log('reset solver for session', d.session);
+        await sleep(CONFIG.pollIntervalMs);
+      }
+      if (!applyConfig(d)) {
+        // Form or data not ready — don't latch, don't start: a later
+        // broadcast/mutation re-runs this with complete values.
+        setTargetNote('waiting for craft data');
         return;
       }
-      const text = scrapeActiveAction();
-      if (text && text !== lastSentAction) sendAction(text);
-    };
+      appliedSession = d.session;
+      repairAttempts.clear();
+      lastSentAction = null;
+    }
+    applyUnlockToggles(d);
 
-    observer = new MutationObserver(() => {
-      clearTimeout(sendTimer);
-      sendTimer = setTimeout(evaluate, CONFIG.sendDebounceMs);
+    // Make sure the solver is running.
+    if (stepRows().length === 0) {
+      const startBtn = await waitFor(() => {
+        const b = startResetButton();
+        return b && b.textContent.trim() === 'Start' && !b.disabled ? b : null;
+      });
+      if (!startBtn) { setTargetNote('solver not ready'); return; }
+      startBtn.click();
+      log('auto-clicked Start');
+      if (!await waitFor(() => stepRows().length > 0, CONFIG.solverRowTimeoutMs)) {
+        setTargetNote('waiting for solver');
+        return;
+      }
+    }
+
+    // Converge Thiria's rows onto the resolved prefix of the history. Re-read
+    // `doc` each iteration so newly resolved entries are picked up mid-pass.
+    for (let i = 0; ; i++) {
+      if (!doc || doc.session !== d.session) return; // superseded by a new craft
+      const steps = doc.steps || [];
+      if (i >= steps.length) break;
+
+      const entry = steps[i];
+      if (entry.success == null || !entry.condition) break; // outcome not observed yet
+
+      const row = await waitFor(() => rowByIndex(i + 1), CONFIG.solverRowTimeoutMs);
+      if (!row) { setTargetNote(`waiting for solver (step ${i + 1})`); return; }
+
+      if (rowFinished(row)) {
+        if (!rowMatches(row, entry)) await repairRow(row, entry, i + 1);
+        continue;
+      }
+
+      setTargetNote(`syncing step ${i + 1}`);
+      if (!await driveRow(row, entry)) { setTargetNote(`step ${i + 1} stuck — see console`); return; }
+    }
+
+    setTargetNote(doc.status === 'complete' ? 'craft complete' : '');
+    publishSuggestion();
+  }
+
+  /**
+   * Complete one Thiria step row from a resolved history entry:
+   * correct the action if the player deviated, set the rolled condition,
+   * then click Success/Failure.
+   */
+  async function driveRow(row, entry) {
+    // 1. Action: if the player used something other than the suggestion,
+    //    enter edit mode (pencil) and pick the real action.
+    if (entry.action && !sameName(rowActionName(row), entry.action)) {
+      if (!isShown(actionSelect(row))) row.querySelector('.edit')?.click();
+      const sel = await waitFor(() => {
+        const s = actionSelect(row);
+        return s && isShown(s) && !s.disabled ? s : null;
+      });
+      if (sel) {
+        if (!setSelectByActionName(sel, entry.action)) {
+          warn(`Thiria has no action named "${entry.action}" — leaving "${rowActionName(row)}"`);
+        }
+      } else {
+        warn('action select never became editable for', entry.action);
+      }
+    }
+
+    // 2. Condition rolled after the action (hidden for buff-only actions).
+    const condSel = conditionSelect(row);
+    if (entry.condition && condSel && isShown(condSel) && condSel.value !== entry.condition) {
+      const enabled = await waitFor(() => (!condSel.disabled ? condSel : null));
+      if (enabled) setReactiveValue(condSel, entry.condition);
+      else warn('condition select stayed disabled');
+    }
+
+    // 3. Result.
+    const wantText = entry.success === false ? 'Failure' : 'Success';
+    let btn = await waitFor(() => {
+      const b = resultButton(row, wantText);
+      return b && isShown(b) && !b.disabled ? b : null;
     });
+    if (!btn && wantText === 'Failure') {
+      // Shouldn't happen (only fallible actions report failure), but never wedge.
+      warn('Failure button unavailable; falling back to Success');
+      btn = await waitFor(() => {
+        const b = resultButton(row, 'Success');
+        return b && !b.disabled ? b : null;
+      });
+    }
+    if (!btn) { warn('result button never enabled'); return false; }
+
+    btn.click();
+    log(`clicked ${wantText} on step row #${rowIndex(row)} (${entry.action || 'suggested action'})`);
+    // Only report success if the click actually registered; otherwise the
+    // caller bails and a later reconcile retries this row.
+    return !!(await waitFor(() => rowFinished(row)));
+  }
+
+  function rowMatches(row, entry) {
+    if (entry.action && !sameName(rowActionName(row), entry.action)) return false;
+    const condSel = conditionSelect(row);
+    if (entry.condition && condSel && isShown(condSel) && condSel.value !== entry.condition) return false;
+    const wantResult = entry.success === false ? 'failure' : 'success';
+    return rowResult(row) === wantResult;
+  }
+
+  /**
+   * A finished row disagrees with what actually happened in game (e.g. it was
+   * clicked manually during a disconnect). Re-open it via the pencil and
+   * re-drive it; every later row resimulates automatically.
+   */
+  async function repairRow(row, entry, index) {
+    const attempts = repairAttempts.get(index) || 0;
+    if (attempts >= CONFIG.repairAttemptsPerRow) {
+      setTargetNote(`step ${index} out of sync`);
+      return;
+    }
+    repairAttempts.set(index, attempts + 1);
+    warn(`repairing desynced step row #${index}`, {
+      have: { action: rowActionName(row), result: rowResult(row) },
+      want: entry,
+    });
+    row.querySelector('.edit')?.click(); // clears the result, enables the selects
+    await sleep(CONFIG.pollIntervalMs);
+    await driveRow(row, entry);
+  }
+
+  // ===========================================================================
+  // Outgoing: the newest unfinished row holds the solver's next suggestion
+  // ===========================================================================
+  function publishSuggestion() {
+    const open = stepRows().filter((r) => !rowFinished(r));
+    if (!open.length) return;
+    const name = rowActionName(open[open.length - 1]);
+    if (name && name !== lastSentAction) sendAction(name);
+  }
+
+  // ===========================================================================
+  // DOM observer — re-reconcile when the solver finishes computing rows
+  // ===========================================================================
+  let observer = null;
+  function attachObserver() {
+    observer = new MutationObserver(() => scheduleReconcile());
     observer.observe(document.body, { childList: true, subtree: true, characterData: true });
-    evaluate();
+    scheduleReconcile();
   }
 
   // ===========================================================================

@@ -17,5 +17,6 @@ public static class System
     public static OverlayWindow           OverlayWindow { get; set; } = null!;
     public static SharedState             State         { get; set; } = null!;
     public static WebSocketServerService  Server        { get; set; } = null!;
+    public static CraftActionTracker      ActionTracker { get; set; } = null!;
     public static CraftStateController    CraftState    { get; set; } = null!;
 }
