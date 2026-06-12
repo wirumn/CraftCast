@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Dashboard <-> Local Bridge
 // @namespace    https://github.com/wirumn/CraftCast
-// @version      3.1.2
+// @version      3.1.3
 // @description  Two-way sync between a local WebSocket app (127.0.0.1:8014) and the Thiria crafting solver.
 // @author       you
 // @match        https://thiria.com/expert/*
@@ -468,6 +468,14 @@
 
     // Make sure the solver is running.
     if (stepRows().length === 0) {
+      if (d.status !== 'active') {
+        // The craft is over. If the board was reset (manually or by us), leave
+        // it empty instead of resurrecting the finished craft's history — only
+        // a live craft justifies rebuilding rows. Mid-craft resets still
+        // self-heal, because there the status is "active".
+        setTargetNote('');
+        return;
+      }
       const startBtn = await waitFor(() => {
         const b = startResetButton();
         return b && b.textContent.trim() === 'Start' && !b.disabled ? b : null;
