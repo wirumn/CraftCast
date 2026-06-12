@@ -407,8 +407,14 @@
 
     // Check for "free" actions that don't increment step (e.g., Final Appraisal, Heart & Soul)
     if (step === lastProcessedStep) {
-      if (typeof msg.cp === 'number' && msg.cp < lastCp) return true; // e.g. Final Appraisal
-      if (typeof msg.condition === 'string' && msg.condition !== lastCondition && msg.condition !== 'normal') return true; // e.g. Heart & Soul
+      const select = findActiveConditionSelect();
+      if (select) {
+        const container = findStepContainer(select);
+        const text = (container?.textContent || '').toLowerCase();
+        
+        if (text.includes('final appraisal') && typeof msg.cp === 'number' && msg.cp < lastCp) return true;
+        if (text.includes('heart and soul') && typeof msg.condition === 'string' && msg.condition !== lastCondition && msg.condition !== 'normal') return true;
+      }
     }
 
     return false;
