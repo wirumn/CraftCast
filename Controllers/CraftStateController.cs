@@ -118,6 +118,7 @@ public sealed class CraftStateController : IDisposable
     private int    _craftsmanship, _control, _maxCp, _playerLevel;
     private int    _maxProgress, _maxDurability, _maxQuality;
     private int    _sheetMaxProgress, _sheetMaxDurability, _sheetMaxQuality;
+    private int    _progressDivider, _progressModifier, _qualityDivider, _qualityModifier;
     private int    _recipeLevel;
     private string _recipeRating = string.Empty;
     private uint   _activeRecipeId;
@@ -265,6 +266,7 @@ public sealed class CraftStateController : IDisposable
         _history.Clear();
         _maxProgress = _maxDurability = _maxQuality = 0;
         _sheetMaxProgress = _sheetMaxDurability = _sheetMaxQuality = 0;
+        _progressDivider = _progressModifier = _qualityDivider = _qualityModifier = 0;
         _recipeLevel = 0;
         _recipeRating = string.Empty;
         _activeRecipeId = 0;
@@ -519,6 +521,13 @@ public sealed class CraftStateController : IDisposable
             _sheetMaxProgress   = (int)(rlt.Difficulty * r.DifficultyFactor / 100);
             _sheetMaxQuality    = (int)((long)rlt.Quality * r.QualityFactor / 100);
             _sheetMaxDurability = rlt.Durability * r.DurabilityFactor / 100;
+
+            // Exact crafting-formula parameters for this rlvl; the client uses
+            // them when the solver doesn't recognize the item.
+            _progressDivider  = rlt.ProgressDivider;
+            _progressModifier = rlt.ProgressModifier;
+            _qualityDivider   = rlt.QualityDivider;
+            _qualityModifier  = rlt.QualityModifier;
         }
         catch (Exception ex)
         {
@@ -578,11 +587,15 @@ public sealed class CraftStateController : IDisposable
             },
             Recipe    = new RecipeInfo
             {
-                Level      = _recipeLevel,
-                Rating     = _recipeRating,
-                Progress   = _maxProgress,
-                Durability = _maxDurability,
-                Quality    = _maxQuality,
+                Level            = _recipeLevel,
+                Rating           = _recipeRating,
+                Progress         = _maxProgress,
+                Durability       = _maxDurability,
+                Quality          = _maxQuality,
+                ProgressDivider  = _progressDivider,
+                ProgressModifier = _progressModifier,
+                QualityDivider   = _qualityDivider,
+                QualityModifier  = _qualityModifier,
             },
             Current   = new SnapshotInfo
             {

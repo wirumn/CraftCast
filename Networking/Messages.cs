@@ -52,6 +52,14 @@ public sealed class RecipeInfo
     [JsonPropertyName("progress")]   public int    Progress   { get; init; }
     [JsonPropertyName("durability")] public int    Durability { get; init; }
     [JsonPropertyName("quality")]    public int    Quality    { get; init; }
+
+    // Exact rlvl-table parameters (raw sheet values; the solver wants /100).
+    // These let the client bypass the solver's item heuristics when it doesn't
+    // recognize the recipe — wrong divisors/penalties skew every simulated bar.
+    [JsonPropertyName("progressDivider")]  public int ProgressDivider  { get; init; }
+    [JsonPropertyName("progressModifier")] public int ProgressModifier { get; init; }
+    [JsonPropertyName("qualityDivider")]   public int QualityDivider   { get; init; }
+    [JsonPropertyName("qualityModifier")]  public int QualityModifier  { get; init; }
 }
 
 /// <summary>Live snapshot of the craft as currently shown in game.</summary>

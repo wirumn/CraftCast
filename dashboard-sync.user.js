@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Dashboard <-> Local Bridge
 // @namespace    https://github.com/wirumn/CraftCast
-// @version      3.0.1
+// @version      3.1.0
 // @description  Two-way sync between a local WebSocket app (127.0.0.1:8014) and the Thiria crafting solver.
 // @author       you
 // @match        https://thiria.com/expert/*
@@ -317,9 +317,11 @@
    * Returns true only when the form existed and the document carried real
    * values — early broadcasts of a session can have zeroed stats while the
    * plugin's addon reads settle, and the page itself may not be built yet.
-   * The caller retries until this succeeds.
+   * The caller retries until this succeeds. A zero player level blocks too:
+   * Thiria only applies the recipe's level penalty when the player level is
+   * right, and simulating without it skews every bar by 10-25%.
    */
-  function applyConfig(d) {
+  async function applyConfig(d) {
     const p = d.player || {};
     const r = d.recipe || {};
 
@@ -339,7 +341,25 @@
     const rating = deepQuery('select[name="itemRating"]');
     if (rating && r.rating && rating.value !== r.rating) setReactiveValue(rating, r.rating);
 
-    return !!(deepQuery('input[name="craftsmanship"]') && p.craftsmanship > 0 && r.progress > 0);
+    // Thiria derives its hidden divisors and level penalties from a list of
+    // known items. When it doesn't recognize this one (the ⚠️ next to Rating),
+    // those are guesses — switch to Custom and feed the exact values from the
+    // game's recipe sheet (Thiria wants them as sheet-value / 100).
+    if (rating && r.progressDivider > 0) {
+      await sleep(150); // let the framework re-evaluate item recognition
+      const unknownMark = deepQuery('label[for="itemRating"] span.baseline');
+      if (unknownMark && isShown(unknownMark) && rating.value !== 'custom') {
+        setReactiveValue(rating, 'custom');
+        setNamedInput(deepQuery('input[name="itemProgressDivisor"]'), r.progressDivider / 100);
+        setNamedInput(deepQuery('input[name="itemProgressLevelAdjustment"]'), r.progressModifier / 100);
+        setNamedInput(deepQuery('input[name="itemQualityDivisor"]'), r.qualityDivider / 100);
+        setNamedInput(deepQuery('input[name="itemQualityLevelAdjustment"]'), r.qualityModifier / 100);
+        log('item unknown to Thiria — applied exact recipe-sheet parameters via Custom rating');
+      }
+    }
+
+    return !!(deepQuery('input[name="craftsmanship"]') &&
+              p.level > 0 && p.craftsmanship > 0 && r.progress > 0);
   }
 
   /**
@@ -404,9 +424,10 @@
         log('reset solver for session', d.session);
         await sleep(CONFIG.pollIntervalMs);
       }
-      if (!applyConfig(d)) {
+      if (!await applyConfig(d)) {
         // Form or data not ready — don't latch, don't start: a later
-        // broadcast/mutation re-runs this with complete values.
+        // broadcast/mutation re-runs this with complete values. If this never
+        // clears, the plugin is outdated and sending zeroed player stats.
         setTargetNote('waiting for craft data');
         return;
       }
