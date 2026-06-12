@@ -73,6 +73,7 @@
   let lastProgress = 0;
   let lastQuality = 0;
   let lastCp = 0;
+  let lastCondition = '';
   let stepStartProgress = 0;
   let stepStartQuality = 0;
   let solverStarted = false;
@@ -374,7 +375,15 @@
       solverStarted = false;
       lastProcessedStep = null;
       lastProgress = lastQuality = lastCp = 0;
+      lastCondition = '';
       stepAdvanceInProgress = false;
+
+      const resetBtn = findButtonByExactText('Reset') || findButtonByExactText('Start');
+      if (resetBtn) {
+        suppressOutbound();
+        resetBtn.click();
+        log('auto-clicked Reset for new craft');
+      }
     }
   }
 
@@ -395,6 +404,13 @@
     if (step === null) return false;
     if (lastProcessedStep === null) return step > 1;
     if (step > lastProcessedStep) return true;
+
+    // Check for "free" actions that don't increment step (e.g., Final Appraisal, Heart & Soul)
+    if (step === lastProcessedStep) {
+      if (typeof msg.cp === 'number' && msg.cp < lastCp) return true; // e.g. Final Appraisal
+      if (typeof msg.condition === 'string' && msg.condition !== lastCondition && msg.condition !== 'normal') return true; // e.g. Heart & Soul
+    }
+
     return false;
   }
 
@@ -404,6 +420,7 @@
       lastQuality = msg.currentQuality;
     }
     if (typeof msg.cp === 'number') lastCp = msg.cp;
+    if (typeof msg.condition === 'string') lastCondition = msg.condition;
   }
 
   // ===========================================================================
@@ -423,13 +440,13 @@
 
     const mapped = CONFIG.conditionMap[msg.condition] || msg.condition;
 
-    // Determine if the action succeeded or failed based on progress/quality delta
-    const progressed = (lastProgress > stepStartProgress) || (lastQuality > stepStartQuality);
-    log(`   progressed=${progressed} (prog ${stepStartProgress}->${lastProgress}, qual ${stepStartQuality}->${lastQuality})`);
-
     let attempts = 0;
     const poll = () => {
       attempts++;
+
+      // Evaluate if the action succeeded based on progress/quality delta.
+      // We do this inside the poll loop to allow FFXIV UI animation to catch up to the step increment.
+      const progressed = (lastProgress > stepStartProgress) || (lastQuality > stepStartQuality);
 
       // Find the active condition select
       const select = findActiveConditionSelect();
@@ -460,7 +477,17 @@
       let targetBtn = null;
       if (failBtns.length > 0) {
         // This step has Success + Failure (e.g., Rapid Synthesis)
-        targetBtn = progressed ? successBtns[successBtns.length - 1] : failBtns[failBtns.length - 1];
+        if (progressed) {
+          targetBtn = successBtns[successBtns.length - 1];
+        } else {
+          // It looks like a failure, but FFXIV step increments before UI bars update.
+          // Wait at least ~800ms (10 attempts) for Quality/Progress to update from the game.
+          if (attempts < 10 && attempts < CONFIG.stepPollMaxAttempts) {
+            setTimeout(poll, CONFIG.stepPollIntervalMs);
+            return;
+          }
+          targetBtn = failBtns[failBtns.length - 1];
+        }
       } else if (successBtns.length > 0) {
         // This step has only Success (e.g., Final Appraisal, Byregot's Blessing)
         targetBtn = successBtns[successBtns.length - 1];
