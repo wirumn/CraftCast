@@ -1,0 +1,78 @@
+name: Build and Publish Plugin Repo
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Setup Dalamud
+        run: |
+          $versionInfo = Invoke-RestMethod -Uri "https://kamori.goats.dev/Dalamud/Release/VersionInfo"
+          Invoke-WebRequest -Uri $versionInfo.downloadUrl -OutFile dalamud.zip
+          $extractPath = "$env:AppData\XIVLauncher\addon\Hooks\dev"
+          New-Item -ItemType Directory -Force -Path $extractPath
+          Expand-Archive -Path dalamud.zip -DestinationPath $extractPath -Force
+
+      - name: Build Plugin
+        run: dotnet build -c Release
+
+      # Dalamud.NET.Sdk runs DalamudPackager during the build: it emits
+      # latest.zip plus the generated manifest under bin/**/CraftCast/.
+      - name: Collect Package
+        run: |
+          $zip = Get-ChildItem -Path bin -Recurse -Filter "latest.zip" | Select-Object -First 1
+          if (-not $zip) { throw "DalamudPackager did not produce latest.zip" }
+          Copy-Item $zip.FullName -Destination "latest.zip"
+
+          $manifest = Get-ChildItem -Path bin -Recurse -Filter "CraftCast.json" |
+            Where-Object { $_.Directory.Name -eq "CraftCast" } | Select-Object -First 1
+          if (-not $manifest) { throw "Generated CraftCast.json manifest not found" }
+          Copy-Item $manifest.FullName -Destination "generated-manifest.json"
+
+      - name: Generate PluginMaster
+        run: |
+          $manifest = Get-Content "generated-manifest.json" | ConvertFrom-Json
+          $pluginInfo = @{
+              Author = $manifest.Author
+              Name = $manifest.Name
+              Punchline = $manifest.Punchline
+              Description = $manifest.Description
+              InternalName = $manifest.InternalName
+              AssemblyVersion = $manifest.AssemblyVersion
+              RepoUrl = $manifest.RepoUrl
+              ApplicableVersion = $manifest.ApplicableVersion
+              Tags = $manifest.Tags
+              DalamudApiLevel = $manifest.DalamudApiLevel
+              DownloadCount = 0
+              LastUpdate = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+              DownloadLinkInstall = "https://raw.githubusercontent.com/${{ github.repository }}/repo/latest.zip"
+              DownloadLinkUpdate = "https://raw.githubusercontent.com/${{ github.repository }}/repo/latest.zip"
+              DownloadLinkTesting = "https://raw.githubusercontent.com/${{ github.repository }}/repo/latest.zip"
+          }
+          $json = $pluginInfo | ConvertTo-Json -Depth 10
+          "[$json]" | Out-File -FilePath "pluginmaster.json" -Encoding UTF8
+
+      - name: Push to Repo Branch
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git checkout -B repo
+          git add latest.zip pluginmaster.json -f
+          git commit -m "Update plugin repository [skip ci]"
+          git push -f origin repo

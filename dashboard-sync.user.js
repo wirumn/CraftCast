@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Dashboard <-> Local Bridge
 // @namespace    https://github.com/wirumn/CraftCast
-// @version      3.1.0
+// @version      3.1.1
 // @description  Two-way sync between a local WebSocket app (127.0.0.1:8014) and the Thiria crafting solver.
 // @author       you
 // @match        https://thiria.com/expert/*
@@ -310,7 +310,7 @@
     if (!el || value === undefined || value === null || value === '' || value === 0) return;
     if (String(el.value) === String(value)) return;
     setReactiveValue(el, value);
-    log('config', el.name || el.id, '->', value);
+    log('config', el.getAttribute('x-bind-value') || el.name || el.id, '->', value);
   }
 
   /**
@@ -325,20 +325,24 @@
     const p = d.player || {};
     const r = d.recipe || {};
 
-    // Both the player and item panels label their level input "level";
-    // they appear in template order: player first, item second.
-    const levels = deepQueryAll('input[name="level"]');
-    setNamedInput(levels[0], p.level);
-    setNamedInput(deepQuery('input[name="cp"]'), p.cp);
-    setNamedInput(deepQuery('input[name="craftsmanship"]'), p.craftsmanship);
-    setNamedInput(deepQuery('input[name="control"]'), p.control);
+    // Target inputs by their reactive binding — names are ambiguous (both the
+    // player and item panels have a "level" input, and DOM order is not
+    // guaranteed; positional selection once wrote the recipe level into the
+    // player field).
+    const bound = (binding) =>
+      deepQuery(`input[x-bind-value="${binding}"], select[x-bind-value="${binding}"]`);
 
-    setNamedInput(levels[1], r.level);
-    setNamedInput(deepQuery('input[name="durability"]'), r.durability);
-    setNamedInput(deepQuery('input[name="progress"]'), r.progress);
-    setNamedInput(deepQuery('input[name="quality"]'), r.quality);
+    setNamedInput(bound('player.level$'), p.level);
+    setNamedInput(bound('player.cp$') || deepQuery('input[name="cp"]'), p.cp);
+    setNamedInput(bound('player.craftsmanship$') || deepQuery('input[name="craftsmanship"]'), p.craftsmanship);
+    setNamedInput(bound('player.control$') || deepQuery('input[name="control"]'), p.control);
 
-    const rating = deepQuery('select[name="itemRating"]');
+    setNamedInput(bound('item.level$'), r.level);
+    setNamedInput(bound('item.durability$') || deepQuery('input[name="durability"]'), r.durability);
+    setNamedInput(bound('item.progress$') || deepQuery('input[name="progress"]'), r.progress);
+    setNamedInput(bound('item.quality$') || deepQuery('input[name="quality"]'), r.quality);
+
+    const rating = bound('item.profile$') || deepQuery('select[name="itemRating"]');
     if (rating && r.rating && rating.value !== r.rating) setReactiveValue(rating, r.rating);
 
     // Thiria derives its hidden divisors and level penalties from a list of
@@ -350,10 +354,10 @@
       const unknownMark = deepQuery('label[for="itemRating"] span.baseline');
       if (unknownMark && isShown(unknownMark) && rating.value !== 'custom') {
         setReactiveValue(rating, 'custom');
-        setNamedInput(deepQuery('input[name="itemProgressDivisor"]'), r.progressDivider / 100);
-        setNamedInput(deepQuery('input[name="itemProgressLevelAdjustment"]'), r.progressModifier / 100);
-        setNamedInput(deepQuery('input[name="itemQualityDivisor"]'), r.qualityDivider / 100);
-        setNamedInput(deepQuery('input[name="itemQualityLevelAdjustment"]'), r.qualityModifier / 100);
+        setNamedInput(bound('item.progressDivisor$'), r.progressDivider / 100);
+        setNamedInput(bound('item.progressLevelAdjustment$'), r.progressModifier / 100);
+        setNamedInput(bound('item.qualityDivisor$'), r.qualityDivider / 100);
+        setNamedInput(bound('item.qualityLevelAdjustment$'), r.qualityModifier / 100);
         log('item unknown to Thiria — applied exact recipe-sheet parameters via Custom rating');
       }
     }
