@@ -91,6 +91,17 @@ that history — resetting on a new session, correcting the action on a row when
 you deviated from the suggestion (via the row's edit pencil), setting the
 rolled condition, and clicking Success/Failure.
 
+### The two "Level" fields
+
+Thiria's Player panel and Item panel both have a field labelled **Level** —
+they are different things and the bridge sets both:
+
+- **Player → Level** is your character level (100). It should never change.
+- **Item → Level** is the recipe's internal level (rlvl), e.g. 729 or 771 —
+  values far above 100 are normal and **correct**. It changes with every
+  different recipe and drives Thiria's hidden divisors and level penalties.
+  Don't "fix" it to 100; that breaks the simulation.
+
 ## Troubleshooting
 
 | Symptom | Meaning |
