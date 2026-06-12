@@ -509,9 +509,14 @@ public sealed class CraftStateController : IDisposable
             if (recipe is not { } r) return;
 
             _activeRecipeId = recipeId;
-            _recipeLevel    = (int)r.RecipeLevelTable.RowId;
 
             var rlt = r.RecipeLevelTable.Value;
+
+            // The solver's item "Level" field is on the JOB level scale
+            // (1-100), not the internal rlvl: its divisor table is keyed on
+            // job levels and the level penalty only triggers on multiples of
+            // 10 — an rlvl like 729 silently skips it and skews every bar.
+            _recipeLevel = rlt.ClassJobLevel;
             _recipeRating = r.IsExpert ? "expert"
                           : rlt.Stars >= 2 ? "star"
                           : "normal";

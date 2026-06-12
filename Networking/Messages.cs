@@ -45,7 +45,11 @@ public sealed class PlayerInfo
 /// <summary>Recipe constants for the active craft.</summary>
 public sealed class RecipeInfo
 {
-    /// <summary>Recipe level (rlvl), e.g. 710 — drives the solver's hidden divisors.</summary>
+    /// <summary>
+    /// The recipe's JOB level (1-100, from RecipeLevelTable.ClassJobLevel) —
+    /// the scale the solver's item Level field and divisor tables expect.
+    /// Never the internal rlvl.
+    /// </summary>
     [JsonPropertyName("level")]      public int    Level      { get; init; }
     /// <summary>"expert", "star" or "normal"; empty when unknown.</summary>
     [JsonPropertyName("rating")]     public string Rating     { get; init; } = string.Empty;

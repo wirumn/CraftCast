@@ -75,7 +75,7 @@ The plugin is the single source of truth:
   from the progress/quality bars. Bar reads are sanity-checked against the
   recipe sheet's real maxes; on content where an AtkValue is junk, the
   affected bar is ignored rather than fabricating failures.
-- Recipe constants (difficulty/durability/quality, rlvl, star/expert rating,
+- Recipe constants (difficulty/durability/quality, job level, star/expert rating,
   and the exact progress/quality dividers and level-penalty modifiers) come
   from the **Recipe sheet**, not the UI. When Thiria doesn't recognize an item
   (⚠️ next to Rating), the userscript switches the Rating to Custom and feeds
@@ -94,13 +94,15 @@ rolled condition, and clicking Success/Failure.
 ### The two "Level" fields
 
 Thiria's Player panel and Item panel both have a field labelled **Level** —
-they are different things and the bridge sets both:
+they are different things and the bridge sets both, **both on the 1-100 job
+level scale**:
 
-- **Player → Level** is your character level (100). It should never change.
-- **Item → Level** is the recipe's internal level (rlvl), e.g. 729 or 771 —
-  values far above 100 are normal and **correct**. It changes with every
-  different recipe and drives Thiria's hidden divisors and level penalties.
-  Don't "fix" it to 100; that breaks the simulation.
+- **Player → Level** is your character level (e.g. 100).
+- **Item → Level** is the recipe's job level (e.g. 100 for endgame recipes,
+  90 for Endwalker ones). It must NOT be the internal rlvl (729, 771, …):
+  Thiria's divisor table is keyed on job levels and its level penalty only
+  triggers on multiples of 10, so an rlvl silently skips the penalty and
+  inflates every simulated bar by 10-25%.
 
 ## Troubleshooting
 
