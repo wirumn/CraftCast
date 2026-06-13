@@ -34,13 +34,19 @@ public sealed class CraftStateController : IDisposable
     private const int AttrCraftsmanship = 70;
     private const int AttrControl       = 71;
     private const int AttrMaxCp         = 11;
-    // "Synthesis" addon AtkValues indices:
+    // "Synthesis" addon AtkValues indices. These mirror Artisan's reader
+    // (GameInterop/Crafting.cs): current Progress=5, Durability=7, Quality=9,
+    // Condition=12, StepIndex=15. The previous quality index (16) held a value
+    // that only resembled quality on standard recipes and was garbage on
+    // cosmic missions — index 9 is the real current quality on all content.
     private const int AtkCurProgress   = 5;
+    private const int AtkCurQuality    = 9;
+    // Max values come from the recipe sheet (CacheRecipeInfo); these addon
+    // slots are only a last-resort fallback and are not authoritative.
     private const int AtkMaxProgress   = 6;
     private const int AtkMaxDurability = 8;
-    private const int AtkCurQuality    = 16;
     private const int AtkMaxQuality    = 17;
-    private const int AtkMinValueCount = 18;
+    private const int AtkMinValueCount = 18; // must exceed every index read above
 
     // Cap reads to ~10/sec; the game ticks far faster and nothing here changes
     // between actions, so polling harder is pure waste.
