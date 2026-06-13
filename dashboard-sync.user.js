@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Dashboard <-> Local Bridge
 // @namespace    https://github.com/wirumn/CraftCast
-// @version      3.1.3
+// @version      3.1.5
 // @description  Two-way sync between a local WebSocket app (127.0.0.1:8014) and the Thiria crafting solver.
 // @author       you
 // @match        https://thiria.com/expert/*
@@ -42,6 +42,7 @@
     solverRowTimeoutMs: 12000,
     reconcileDebounceMs: 120,
     repairAttemptsPerRow: 2,
+    driveAttemptsPerRow: 4,
 
     reconnect: { baseDelayMs: 1000, maxDelayMs: 30000, factor: 2, jitterRatio: 0.25 },
     heartbeat: { intervalMs: 15000, timeoutMs: 30000 },
@@ -71,6 +72,7 @@
   let doc = null;                 // latest state document from the plugin
   let appliedSession = -1;        // session whose config/reset has been applied
   const repairAttempts = new Map(); // row index -> repair count for this session
+  const driveFailures = new Map();  // row index -> consecutive failed drives
 
   let reconciling = false;
   let rerunRequested = false;
@@ -239,6 +241,17 @@
 
   const sameName = (a, b) =>
     (a || '').trim().toLowerCase() === (b || '').trim().toLowerCase();
+
+  // Actions Thiria/the game treat as the same slot, so a name mismatch between
+  // them must not trigger an endless re-drive. Daring Touch is the upgrade of
+  // Hasty Touch (fires when Expedience is active).
+  const ACTION_ALIASES = [['hasty touch', 'daring touch']];
+  function actionsCompatible(a, b) {
+    if (sameName(a, b)) return true;
+    const x = (a || '').trim().toLowerCase();
+    const y = (b || '').trim().toLowerCase();
+    return ACTION_ALIASES.some((g) => g.includes(x) && g.includes(y));
+  }
 
   // ===========================================================================
   // Thiria accessors
@@ -459,6 +472,7 @@
       }
       appliedSession = d.session;
       repairAttempts.clear();
+      driveFailures.clear();
       lastSentAction = null;
     }
     applyUnlockToggles(d);
@@ -504,11 +518,26 @@
 
       if (rowFinished(row)) {
         if (!rowMatches(row, entry)) await repairRow(row, entry, i + 1);
+        else driveFailures.delete(i + 1);
         continue;
       }
 
+      // Stop hammering a row that won't complete (e.g. Thiria rejects an
+      // action switch). Bail until the document changes, instead of letting
+      // DOM mutations from our own clicks re-trigger an infinite drive loop.
+      if ((driveFailures.get(i + 1) || 0) >= CONFIG.driveAttemptsPerRow) {
+        setTargetNote(`step ${i + 1} stuck — switch it manually`);
+        return;
+      }
+
       setTargetNote(`syncing step ${i + 1}`);
-      if (!await driveRow(row, entry)) { setTargetNote(`step ${i + 1} stuck — see console`); return; }
+      if (await driveRow(row, entry)) {
+        driveFailures.delete(i + 1);
+      } else {
+        driveFailures.set(i + 1, (driveFailures.get(i + 1) || 0) + 1);
+        setTargetNote(`step ${i + 1} stuck — see console`);
+        return;
+      }
     }
 
     setTargetNote(doc.status === 'complete' ? 'craft complete' : '');
@@ -522,8 +551,9 @@
    */
   async function driveRow(row, entry) {
     // 1. Action: if the player used something other than the suggestion,
-    //    enter edit mode (pencil) and pick the real action.
-    if (entry.action && !sameName(rowActionName(row), entry.action)) {
+    //    enter edit mode (pencil) and pick the real action. Aliased actions
+    //    (Hasty/Daring Touch) are already equivalent — don't fight Thiria.
+    if (entry.action && !actionsCompatible(rowActionName(row), entry.action)) {
       if (!isShown(actionSelect(row))) row.querySelector('.edit')?.click();
       const sel = await waitFor(() => {
         const s = actionSelect(row);
@@ -570,7 +600,7 @@
   }
 
   function rowMatches(row, entry) {
-    if (entry.action && !sameName(rowActionName(row), entry.action)) return false;
+    if (entry.action && !actionsCompatible(rowActionName(row), entry.action)) return false;
     const condSel = conditionSelect(row);
     if (entry.condition && condSel && isShown(condSel) && condSel.value !== entry.condition) return false;
     const wantResult = entry.success === false ? 'failure' : 'success';

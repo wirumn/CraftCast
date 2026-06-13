@@ -73,7 +73,20 @@ public sealed unsafe class CraftActionTracker : IDisposable
             // client-side, so an accepted craft action virtually always lands).
             if (used && Services.Condition[ConditionFlag.Crafting])
             {
-                var name = ResolveEnglishName(actionType, actionId);
+                // Resolve action upgrades: pressing Hasty Touch while Expedience
+                // is active executes Daring Touch, but UseAction is still called
+                // with Hasty Touch's id. GetAdjustedActionId returns the action
+                // that actually fires, so the solver sees what really happened.
+                var resolvedId = actionId;
+                try
+                {
+                    var adjusted = manager->GetAdjustedActionId(actionId);
+                    if (adjusted != 0) resolvedId = adjusted;
+                }
+                catch { /* fall back to the raw id below */ }
+
+                var name = ResolveEnglishName(actionType, resolvedId)
+                        ?? ResolveEnglishName(actionType, actionId);
                 if (!string.IsNullOrEmpty(name))
                     CraftActionUsed?.Invoke(name);
             }
