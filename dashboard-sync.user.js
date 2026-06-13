@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Dashboard <-> Local Bridge
 // @namespace    https://github.com/wirumn/CraftCast
-// @version      3.1.6
+// @version      3.1.7
 // @description  Two-way sync between a local WebSocket app (127.0.0.1:8014) and the Thiria crafting solver.
 // @author       you
 // @match        https://thiria.com/expert/*
@@ -73,6 +73,7 @@
   let appliedSession = -1;        // session whose config/reset has been applied
   const repairAttempts = new Map(); // row index -> repair count for this session
   const driveFailures = new Map();  // row index -> consecutive failed drives
+  const unsupportedActions = new Set(); // actions Thiria's solver can't represent
 
   let reconciling = false;
   let rerunRequested = false;
@@ -487,6 +488,7 @@
       appliedSession = d.session;
       repairAttempts.clear();
       driveFailures.clear();
+      unsupportedActions.clear();
       lastSentAction = null;
     }
     applyUnlockToggles(d);
@@ -563,11 +565,14 @@
    * correct the action if the player deviated, set the rolled condition,
    * then click Success/Failure.
    */
+  const isUnsupported = (name) => unsupportedActions.has((name || '').trim().toLowerCase());
+
   async function driveRow(row, entry) {
     // 1. Action: if the player used something other than the suggestion,
     //    enter edit mode (pencil) and pick the real action. Aliased actions
     //    (Hasty/Daring Touch) are already equivalent — don't fight Thiria.
-    if (entry.action && !actionsCompatible(rowActionName(row), entry.action)) {
+    if (entry.action && !isUnsupported(entry.action) &&
+        !actionsCompatible(rowActionName(row), entry.action)) {
       if (!isShown(actionSelect(row))) row.querySelector('.edit')?.click();
       const sel = await waitFor(() => {
         const s = actionSelect(row);
@@ -575,7 +580,13 @@
       });
       if (sel) {
         if (!setSelectByActionName(sel, entry.action)) {
-          warn(`Thiria has no action named "${entry.action}" — leaving "${rowActionName(row)}"`);
+          // Thiria's solver doesn't model this action (e.g. cosmic-only
+          // Material Miracle). We can't represent it — accept Thiria's own
+          // action for this row, complete it so the craft keeps flowing, and
+          // warn that the simulation will drift from here.
+          unsupportedActions.add(entry.action.trim().toLowerCase());
+          warn(`Thiria can't represent "${entry.action}" — accepting "${rowActionName(row)}" and continuing; sim may drift from this step.`);
+          setTargetNote(`"${entry.action}" unsupported — sim may drift`);
         }
       } else {
         warn('action select never became editable for', entry.action);
@@ -614,7 +625,9 @@
   }
 
   function rowMatches(row, entry) {
-    if (entry.action && !actionsCompatible(rowActionName(row), entry.action)) return false;
+    // Unsupported actions are accepted as-is, so they never trigger a repair loop.
+    if (entry.action && !isUnsupported(entry.action) &&
+        !actionsCompatible(rowActionName(row), entry.action)) return false;
     const condSel = conditionSelect(row);
     if (entry.condition && condSel && isShown(condSel) && condSel.value !== entry.condition) return false;
     const wantResult = entry.success === false ? 'failure' : 'success';
