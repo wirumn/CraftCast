@@ -91,6 +91,16 @@ that history — resetting on a new session, correcting the action on a row when
 you deviated from the suggestion (via the row's edit pencil), setting the
 rolled condition, and clicking Success/Failure.
 
+### Taking manual control
+
+If something goes wrong mid-craft and you want to fix Thiria by hand, click the
+**⏸ Pause** button on the status pill (or press **Ctrl+Shift+P**). While paused
+the bridge touches nothing on the page — no Start/Reset, no condition or
+Success/Failure clicks — so your manual edits stick. The pill turns purple and
+the in-game overlay keeps updating. Click **▶ Resume** (or Ctrl+Shift+P again)
+to hand control back; on resume it re-syncs the rows to the craft history
+without resetting the solver, so it won't wipe a craft in progress.
+
 ### The two "Level" fields
 
 Thiria's Player panel and Item panel both have a field labelled **Level** —

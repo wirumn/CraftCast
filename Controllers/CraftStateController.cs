@@ -129,6 +129,13 @@ public sealed class CraftStateController : IDisposable
     private bool   _progressTrusted = true;
     private bool   _qualityTrusted  = true;
 
+    // A bar is "responsive" once we've seen two distinct non-zero values:
+    // it tracks the craft even if its absolute scale is wrong (cosmic quality
+    // exceeds the sheet max but still climbs/stalls correctly). A frozen junk
+    // bar stays a single constant — not responsive — and yields no signal.
+    private int    _firstProgress = -1, _firstQuality = -1;
+    private bool   _progressResponsive, _qualityResponsive;
+
     // Live snapshot.
     private int    _step = -1;
     private string _condition = string.Empty;
@@ -219,7 +226,21 @@ public sealed class CraftStateController : IDisposable
             if (settledIn && _qualityTrusted && _maxQuality > 0 && (uint)curQuality > (uint)_maxQuality)
             {
                 _qualityTrusted = false;
-                Services.Log.Warning($"CraftCast: quality read {curQuality} exceeds max {_maxQuality}; quality reads untrusted this craft.");
+                Services.Log.Warning($"CraftCast: quality read {curQuality} exceeds max {_maxQuality}; absolute quality untrusted (deltas still used if responsive).");
+            }
+
+            // Track responsiveness: a second distinct non-zero reading proves
+            // the bar moves with the craft, so before/after deltas are valid
+            // for fallible-action outcomes even when the absolute is untrusted.
+            if (curProgress > 0)
+            {
+                if (_firstProgress < 0) _firstProgress = curProgress;
+                else if (curProgress != _firstProgress) _progressResponsive = true;
+            }
+            if (curQuality > 0)
+            {
+                if (_firstQuality < 0) _firstQuality = curQuality;
+                else if (curQuality != _firstQuality) _qualityResponsive = true;
             }
 
             // 1. Record actions the player performed since the last tick.
@@ -271,6 +292,8 @@ public sealed class CraftStateController : IDisposable
         _recipeRating = string.Empty;
         _activeRecipeId = 0;
         _progressTrusted = _qualityTrusted = true;
+        _progressResponsive = _qualityResponsive = false;
+        _firstProgress = _firstQuality = -1;
         _step = -1;
         _condition = string.Empty;
         _curProgress = _curQuality = _cp = 0;
@@ -441,12 +464,18 @@ public sealed class CraftStateController : IDisposable
     /// </summary>
     private bool? JudgeFallible(StepEntry entry, int progress, int quality, bool settled)
     {
-        var trusted = entry.FailsOnQuality ? _qualityTrusted : _progressTrusted;
-        if (!trusted)
+        // The bar is usable for a before/after delta if its absolute is in
+        // range (trusted) OR it has been observed to move (responsive). Only a
+        // frozen junk bar gives us nothing — there we assume success, since a
+        // fabricated failure derails the solver far worse.
+        var usable = entry.FailsOnQuality
+            ? (_qualityTrusted || _qualityResponsive)
+            : (_progressTrusted || _progressResponsive);
+        if (!usable)
         {
             Services.Log.Warning(
                 $"CraftCast: cannot verify outcome of '{entry.Action}' " +
-                $"({(entry.FailsOnQuality ? "quality" : "progress")} reads untrusted); assuming success.");
+                $"({(entry.FailsOnQuality ? "quality" : "progress")} bar gives no signal); assuming success.");
             return true;
         }
 

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Dashboard <-> Local Bridge
 // @namespace    https://github.com/wirumn/CraftCast
-// @version      3.1.5
+// @version      3.1.6
 // @description  Two-way sync between a local WebSocket app (127.0.0.1:8014) and the Thiria crafting solver.
 // @author       you
 // @match        https://thiria.com/expert/*
@@ -77,6 +77,12 @@
   let reconciling = false;
   let rerunRequested = false;
   let reconcileTimer = null;
+
+  // Manual-control latch: when paused, the bridge touches nothing on the page
+  // (no Start/Reset, no config, no Success/Failure clicks), so you can edit
+  // Thiria's steps by hand. It still reports state and the suggestion. Toggle
+  // via the status pill or Ctrl+Shift+P.
+  let paused = false;
 
   // ===========================================================================
   // Shadow-DOM-aware queries
@@ -447,6 +453,14 @@
     const d = doc;
     if (!d) return;
 
+    if (paused) {
+      // Hands off the page — let the user drive Thiria manually. Still surface
+      // the current suggestion so the in-game overlay keeps updating.
+      setTargetNote('paused — manual control (click to resume)');
+      publishSuggestion();
+      return;
+    }
+
     if (!d.fromStart) {
       // Plugin attached mid-craft: history is incomplete, driving the solver
       // would fabricate steps. Stay hands-off, still surface the suggestion.
@@ -672,14 +686,40 @@
     Object.assign(dot.style, { width: '9px', height: '9px', borderRadius: '50%', display: 'inline-block', flex: '0 0 auto' });
     const label = document.createElement('span');
     label.className = 'label';
-    statusEl.append(dot, label);
+
+    // The pill itself stays click-through; only this toggle takes clicks, so
+    // it never blocks the page underneath. It pauses/resumes auto-control.
+    const toggle = document.createElement('button');
+    toggle.className = 'toggle';
+    Object.assign(toggle.style, {
+      pointerEvents: 'auto', cursor: 'pointer', border: '1px solid #fff6',
+      background: 'transparent', color: '#fff', borderRadius: '4px',
+      font: 'inherit', padding: '1px 6px', flex: '0 0 auto',
+    });
+    toggle.addEventListener('click', (e) => { e.stopPropagation(); togglePaused(); });
+
+    statusEl.append(dot, label, toggle);
     document.body.appendChild(statusEl);
     renderStatus();
   }
   function renderStatus() {
     if (!statusEl) return;
-    statusEl.querySelector('.dot').style.background = STATUS_DOT[currentStatus.state] || STATUS_DOT.disconnected;
+    statusEl.querySelector('.dot').style.background =
+      paused ? '#9b59b6' : (STATUS_DOT[currentStatus.state] || STATUS_DOT.disconnected);
     statusEl.querySelector('.label').textContent = currentStatus.text + (targetNote ? ` · ${targetNote}` : '');
+    const toggle = statusEl.querySelector('.toggle');
+    if (toggle) toggle.textContent = paused ? '▶ Resume' : '⏸ Pause';
+  }
+  function togglePaused() {
+    paused = !paused;
+    log(paused ? 'auto-control PAUSED — edit Thiria manually' : 'auto-control RESUMED');
+    renderStatus();
+    if (!paused) {
+      // Resume where things stand (don't reset the solver and wipe manual
+      // edits); give any previously-stuck rows a fresh chance.
+      driveFailures.clear();
+      scheduleReconcile();
+    }
   }
   function setStatus(state, text) { currentStatus = { state, text: text || state }; renderStatus(); }
   function setTargetNote(note) {
@@ -698,6 +738,14 @@
     stopHeartbeat();
     if (socket) { try { socket.close(); } catch (_) {} }
     if (observer) observer.disconnect();
+  });
+
+  // Ctrl+Shift+P: pause/resume auto-control (backup for the pill button).
+  window.addEventListener('keydown', (e) => {
+    if (e.ctrlKey && e.shiftKey && (e.key === 'P' || e.key === 'p')) {
+      e.preventDefault();
+      togglePaused();
+    }
   });
 
   connect();
