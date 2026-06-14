@@ -10,7 +10,7 @@
   <PropertyGroup>
     <!-- Bump this to ship an update through the plugin repo: Dalamud compares
          AssemblyVersion in pluginmaster.json to decide when to offer updates. -->
-    <AssemblyVersion>3.1.8.0</AssemblyVersion>
+    <AssemblyVersion>3.1.9.0</AssemblyVersion>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
 

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Dashboard <-> Local Bridge
 // @namespace    https://github.com/wirumn/CraftCast
-// @version      3.1.7
+// @version      3.1.9
 // @description  Two-way sync between a local WebSocket app (127.0.0.1:8014) and the Thiria crafting solver.
 // @author       you
 // @match        https://thiria.com/expert/*
@@ -74,6 +74,7 @@
   const repairAttempts = new Map(); // row index -> repair count for this session
   const driveFailures = new Map();  // row index -> consecutive failed drives
   const unsupportedActions = new Set(); // actions Thiria's solver can't represent
+  const skipNoted = new Set();          // history indices we've logged as skipped
 
   let reconciling = false;
   let rerunRequested = false;
@@ -253,6 +254,13 @@
   // them must not trigger an endless re-drive. Daring Touch is the upgrade of
   // Hasty Touch (fires when Expedience is active).
   const ACTION_ALIASES = [['hasty touch', 'daring touch']];
+
+  // Actions Thiria's solver doesn't model at all. They occupy no Thiria step
+  // row, so the reconciler skips them entirely — keeping every later step
+  // aligned 1:1. (Material Miracle is a cosmic, step-free condition buff; the
+  // good conditions it forces still reach Thiria via the next action's row.)
+  const KNOWN_UNSUPPORTED = new Set(['material miracle']);
+  const isKnownUnsupported = (name) => KNOWN_UNSUPPORTED.has((name || '').trim().toLowerCase());
   function actionsCompatible(a, b) {
     if (sameName(a, b)) return true;
     const x = (a || '').trim().toLowerCase();
@@ -489,6 +497,7 @@
       repairAttempts.clear();
       driveFailures.clear();
       unsupportedActions.clear();
+      skipNoted.clear();
       lastSentAction = null;
     }
     applyUnlockToggles(d);
@@ -521,37 +530,51 @@
 
     // Converge Thiria's rows onto the resolved prefix of the history. Re-read
     // `doc` each iteration so newly resolved entries are picked up mid-pass.
+    // `rowNum` tracks the Thiria row index separately from the history index:
+    // actions Thiria can't model occupy no row, so skipping them keeps every
+    // later step aligned (no off-by-one).
+    let rowNum = 0;
     for (let i = 0; ; i++) {
       if (!doc || doc.session !== d.session) return; // superseded by a new craft
       const steps = doc.steps || [];
       if (i >= steps.length) break;
 
       const entry = steps[i];
-      if (entry.success == null || !entry.condition) break; // outcome not observed yet
 
-      const row = await waitFor(() => rowByIndex(i + 1), CONFIG.solverRowTimeoutMs);
-      if (!row) { setTargetNote(`waiting for solver (step ${i + 1})`); return; }
+      if (entry.action && isKnownUnsupported(entry.action)) {
+        if (!skipNoted.has(i)) {
+          skipNoted.add(i);
+          log(`skipping "${entry.action}" — Thiria can't model it; later steps stay aligned`);
+        }
+        continue; // no Thiria row consumed
+      }
+
+      if (entry.success == null || !entry.condition) break; // outcome not observed yet
+      rowNum++;
+
+      const row = await waitFor(() => rowByIndex(rowNum), CONFIG.solverRowTimeoutMs);
+      if (!row) { setTargetNote(`waiting for solver (step ${rowNum})`); return; }
 
       if (rowFinished(row)) {
-        if (!rowMatches(row, entry)) await repairRow(row, entry, i + 1);
-        else driveFailures.delete(i + 1);
+        if (!rowMatches(row, entry)) await repairRow(row, entry, rowNum);
+        else driveFailures.delete(rowNum);
         continue;
       }
 
       // Stop hammering a row that won't complete (e.g. Thiria rejects an
       // action switch). Bail until the document changes, instead of letting
       // DOM mutations from our own clicks re-trigger an infinite drive loop.
-      if ((driveFailures.get(i + 1) || 0) >= CONFIG.driveAttemptsPerRow) {
-        setTargetNote(`step ${i + 1} stuck — switch it manually`);
+      if ((driveFailures.get(rowNum) || 0) >= CONFIG.driveAttemptsPerRow) {
+        setTargetNote(`step ${rowNum} stuck — switch it manually`);
         return;
       }
 
-      setTargetNote(`syncing step ${i + 1}`);
+      setTargetNote(`syncing step ${rowNum}`);
       if (await driveRow(row, entry)) {
-        driveFailures.delete(i + 1);
+        driveFailures.delete(rowNum);
       } else {
-        driveFailures.set(i + 1, (driveFailures.get(i + 1) || 0) + 1);
-        setTargetNote(`step ${i + 1} stuck — see console`);
+        driveFailures.set(rowNum, (driveFailures.get(rowNum) || 0) + 1);
+        setTargetNote(`step ${rowNum} stuck — see console`);
         return;
       }
     }
@@ -565,7 +588,8 @@
    * correct the action if the player deviated, set the rolled condition,
    * then click Success/Failure.
    */
-  const isUnsupported = (name) => unsupportedActions.has((name || '').trim().toLowerCase());
+  const isUnsupported = (name) =>
+    isKnownUnsupported(name) || unsupportedActions.has((name || '').trim().toLowerCase());
 
   async function driveRow(row, entry) {
     // 1. Action: if the player used something other than the suggestion,

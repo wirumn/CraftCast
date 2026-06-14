@@ -91,6 +91,16 @@ that history — resetting on a new session, correcting the action on a row when
 you deviated from the suggestion (via the row's edit pencil), setting the
 rolled condition, and clicking Success/Failure.
 
+### Cosmic actions Thiria doesn't model
+
+Thiria's solver knows one cosmic action (Stellar Steady Hand) but **not
+Material Miracle**. When you use Material Miracle, the bridge skips it (it's a
+step-free condition buff — no Thiria row), so the rest of the craft stays
+aligned and the good conditions it forces still reach Thiria through the next
+step. Thiria simply won't *recommend* Material Miracle, because it can't model
+it. For cosmic missions built around it, your Artisan/Raphael solver already
+handles it optimally.
+
 ### Taking manual control
 
 If something goes wrong mid-craft and you want to fix Thiria by hand, click the

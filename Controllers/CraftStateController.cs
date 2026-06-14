@@ -75,6 +75,13 @@ public sealed class CraftStateController : IDisposable
     private static readonly HashSet<string> StepFreeActions = new(StringComparer.OrdinalIgnoreCase)
     {
         "Final Appraisal", "Heart and Soul", "Careful Observation", "Quick Innovation",
+        "Material Miracle", // cosmic buff: no step, just forces a good condition (45s)
+    };
+
+    /// <summary>Step-free actions that reroll/force the condition immediately.</summary>
+    private static readonly HashSet<string> ConditionChangingFreeActions = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "Careful Observation", "Material Miracle",
     };
 
     /// <summary>Actions with a success rate below 100%.</summary>
@@ -375,7 +382,7 @@ public sealed class CraftStateController : IDisposable
             Index            = _history.Count + 1,
             Action           = action,
             IsFree           = StepFreeActions.Contains(action),
-            RerollsCondition = string.Equals(action, "Careful Observation", StringComparison.OrdinalIgnoreCase),
+            RerollsCondition = ConditionChangingFreeActions.Contains(action),
             CanFail          = FallibleActions.Contains(action),
             FailsOnQuality   = string.Equals(action, "Hasty Touch", StringComparison.OrdinalIgnoreCase)
                             || string.Equals(action, "Daring Touch", StringComparison.OrdinalIgnoreCase),
