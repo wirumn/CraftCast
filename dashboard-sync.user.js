@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Dashboard <-> Local Bridge
 // @namespace    https://github.com/wirumn/CraftCast
-// @version      3.1.9
+// @version      3.2.0
 // @description  Two-way sync between a local WebSocket app (127.0.0.1:8014) and the Thiria crafting solver.
 // @author       you
 // @match        https://thiria.com/expert/*
@@ -274,10 +274,12 @@
 
   // The Start/Reset button: label is "Start" before the solver runs, "Reset" after.
   function startResetButton() {
-    return deepQueryAll('button').find((b) => {
-      const t = b.textContent.trim();
-      return t === 'Start' || t === 'Reset';
-    }) || null;
+    return deepQuery('button[x-event-click="start"]') ||
+      deepQuery('button.label.solve') ||
+      deepQueryAll('button').find((b) => {
+        const t = b.textContent.trim();
+        return t === 'Start' || t === 'Reset';
+      }) || null;
   }
 
   // Thiria's x-items stamps each step inside an <x-item-host> wrapper, so the
@@ -303,24 +305,38 @@
 
   // "Use <span>NAME</span>." — the inner span carries the action name.
   function rowActionName(row) {
-    const span = row.querySelector('.steptext .bold span');
-    return span ? span.textContent.trim() : '';
+    const span = row.querySelector('.steptext .bold span') ||
+                 row.querySelector('.steptext .bold') ||
+                 row.querySelector('.steptext span');
+    if (!span) return '';
+    return span.textContent.replace(/^Use\s+/i, '').replace(/\.$/, '').trim();
+  }
+
+  function editButton(row) {
+    return row.querySelector('button[x-event-click="edit"]') ||
+      row.querySelector('button[title*="Edit"]') ||
+      row.querySelector('.edit') ||
+      row.querySelector('.stepbutton button') || null;
   }
 
   function actionSelect(row) {
-    return row.querySelector('select[xu-action-options]') ||
+    return row.querySelector('select[name="stepAction"]') ||
+      row.querySelector('select[xu-action-options]') ||
       Array.from(row.querySelectorAll('select'))
         .find((s) => !s.querySelector('option[value="normal"]')) || null;
   }
 
   function conditionSelect(row) {
-    return Array.from(row.querySelectorAll('select'))
-      .find((s) => s.querySelector('option[value="normal"]')) || null;
+    return row.querySelector('select[name="stepCondition"]') ||
+      row.querySelector('select[x-bind-value="condition$"]') ||
+      Array.from(row.querySelectorAll('select'))
+        .find((s) => s.querySelector('option[value="normal"]')) || null;
   }
 
   function resultButton(row, text) {
-    return Array.from(row.querySelectorAll('button.result'))
-      .find((b) => b.textContent.includes(text)) || null;
+    const t = text.toLowerCase();
+    return Array.from(row.querySelectorAll('button.result, button.solve, button'))
+      .find((b) => b.textContent.toLowerCase().includes(t) || b.getAttribute('x-event-click')?.toLowerCase().includes(t)) || null;
   }
 
   // 'success' | 'failure' | null — Thiria marks the clicked button with a class.
@@ -341,6 +357,39 @@
     log('config', el.getAttribute('x-bind-value') || el.name || el.id, '->', value);
   }
 
+  // Target inputs by their reactive binding — names are ambiguous or prefixed
+  // by panel in newer Thiria releases (playerLevel vs itemLevel).
+  const bound = (binding) =>
+    deepQuery(`input[x-bind-value="${binding}"], select[x-bind-value="${binding}"]`);
+
+  /**
+   * The numeric stat fields, written only when they differ from the payload.
+   * Runs on EVERY reconcile pass, not just at session start: Thiria restores
+   * form state from the URL bookmark on load/reset, which can resurrect stale
+   * values after the one-time config already ran.
+   */
+  function enforceStats(d) {
+    const p = d.player || {};
+    const r = d.recipe || {};
+
+    setNamedInput(bound('player.level$') || deepQuery('#playerLevel') || deepQuery('input[name="playerLevel"]'), p.level);
+    setNamedInput(bound('player.cp$') || deepQuery('#playerCP') || deepQuery('input[name="playerCP"]') || deepQuery('input[name="cp"]'), p.cp);
+    setNamedInput(bound('player.craftsmanship$') || deepQuery('#playerCraftsmanship') || deepQuery('input[name="playerCraftsmanship"]') || deepQuery('input[name="craftsmanship"]'), p.craftsmanship);
+    setNamedInput(bound('player.control$') || deepQuery('#playerControl') || deepQuery('input[name="playerControl"]') || deepQuery('input[name="control"]'), p.control);
+
+    setNamedInput(bound('item.level$') || deepQuery('#itemLevel') || deepQuery('input[name="itemLevel"]'), r.level);
+    setNamedInput(bound('item.durability$') || deepQuery('#itemDurability') || deepQuery('input[name="itemDurability"]') || deepQuery('input[name="durability"]'), r.durability);
+    setNamedInput(bound('item.progress$') || deepQuery('#itemProgress') || deepQuery('input[name="itemProgress"]') || deepQuery('input[name="progress"]'), r.progress);
+    setNamedInput(bound('item.quality$') || deepQuery('#itemQuality') || deepQuery('input[name="itemQuality"]') || deepQuery('input[name="quality"]'), r.quality);
+  }
+
+  function logLevelFields() {
+    const pl = bound('player.level$') || deepQuery('#playerLevel');
+    const il = bound('item.level$') || deepQuery('#itemLevel');
+    log(`level check: Player panel=${pl ? pl.value : 'n/a'} (should be your character level), ` +
+        `Item panel=${il ? il.value : 'n/a'} (recipe rlvl, >100 is normal)`);
+  }
+
   /**
    * Returns true only when the form existed and the document carried real
    * values — early broadcasts of a session can have zeroed stats while the
@@ -356,7 +405,7 @@
     enforceStats(d);
     logLevelFields();
 
-    const rating = bound('item.profile$') || deepQuery('select[name="itemRating"]');
+    const rating = bound('item.profile$') || deepQuery('#itemRating') || deepQuery('select[name="itemRating"]');
     if (rating && r.rating && rating.value !== r.rating) setReactiveValue(rating, r.rating);
 
     // Thiria derives its hidden divisors and level penalties from a list of
@@ -365,55 +414,25 @@
     // game's recipe sheet (Thiria wants them as sheet-value / 100).
     if (rating && r.progressDivider > 0) {
       await sleep(150); // let the framework re-evaluate item recognition
-      const unknownMark = deepQuery('label[for="itemRating"] span.baseline');
+      const unknownMark = deepQuery('label[for="itemRating"] span[title*="not correspond to a known item"]') ||
+                          deepQuery('label[for="itemRating"] span.baseline') ||
+                          deepQuery('label[for="itemRating"] span:not(.hidden) span[translate="no"]');
       if (unknownMark && isShown(unknownMark) && rating.value !== 'custom') {
         setReactiveValue(rating, 'custom');
-        setNamedInput(bound('item.progressDivisor$'), r.progressDivider / 100);
-        setNamedInput(bound('item.progressLevelAdjustment$'), r.progressModifier / 100);
-        setNamedInput(bound('item.qualityDivisor$'), r.qualityDivider / 100);
-        setNamedInput(bound('item.qualityLevelAdjustment$'), r.qualityModifier / 100);
+        setNamedInput(bound('item.progressDivisor$') || deepQuery('#itemProgressDivisor'), r.progressDivider / 100);
+        setNamedInput(bound('item.progressLevelAdjustment$') || deepQuery('#itemProgressLevelAdjustment'), r.progressModifier / 100);
+        setNamedInput(bound('item.qualityDivisor$') || deepQuery('#itemQualityDivisor'), r.qualityDivider / 100);
+        setNamedInput(bound('item.qualityLevelAdjustment$') || deepQuery('#itemQualityLevelAdjustment'), r.qualityModifier / 100);
         log('item unknown to Thiria — applied exact recipe-sheet parameters via Custom rating');
       }
     }
 
-    return !!(deepQuery('input[name="craftsmanship"]') &&
-              p.level > 0 && p.craftsmanship > 0 && r.progress > 0);
-  }
+    const craftInput = bound('player.craftsmanship$') ||
+                       deepQuery('#playerCraftsmanship') ||
+                       deepQuery('input[name="playerCraftsmanship"]') ||
+                       deepQuery('input[name="craftsmanship"]');
 
-  // Target inputs by their reactive binding — names are ambiguous (both the
-  // player and item panels have a "level" input, and DOM order is not
-  // guaranteed; positional selection once wrote the recipe level into the
-  // player field).
-  const bound = (binding) =>
-    deepQuery(`input[x-bind-value="${binding}"], select[x-bind-value="${binding}"]`);
-
-  /**
-   * The numeric stat fields, written only when they differ from the payload.
-   * Runs on EVERY reconcile pass, not just at session start: Thiria restores
-   * form state from the URL bookmark on load/reset, which can resurrect stale
-   * values (e.g. a wrong player level saved by an old script version) after
-   * the one-time config already ran.
-   */
-  function enforceStats(d) {
-    const p = d.player || {};
-    const r = d.recipe || {};
-
-    setNamedInput(bound('player.level$'), p.level);
-    setNamedInput(bound('player.cp$') || deepQuery('input[name="cp"]'), p.cp);
-    setNamedInput(bound('player.craftsmanship$') || deepQuery('input[name="craftsmanship"]'), p.craftsmanship);
-    setNamedInput(bound('player.control$') || deepQuery('input[name="control"]'), p.control);
-
-    setNamedInput(bound('item.level$'), r.level);
-    setNamedInput(bound('item.durability$') || deepQuery('input[name="durability"]'), r.durability);
-    setNamedInput(bound('item.progress$') || deepQuery('input[name="progress"]'), r.progress);
-    setNamedInput(bound('item.quality$') || deepQuery('input[name="quality"]'), r.quality);
-  }
-
-  function logLevelFields() {
-    const pl = bound('player.level$');
-    const il = bound('item.level$');
-    log(`level check: Player panel=${pl ? pl.value : 'n/a'} (should be your character level), ` +
-        `Item panel=${il ? il.value : 'n/a'} (recipe rlvl, >100 is normal)`);
+    return !!(craftInput && p.level > 0 && p.craftsmanship > 0 && r.progress > 0);
   }
 
   /**
@@ -426,8 +445,10 @@
   function applyUnlockToggles(d) {
     const used = (d.steps || []).map((s) => (s.action || '').toLowerCase());
     const ensure = (name) => {
-      const wrap = deepQuery(`[name="${name}"]`);
-      const sel = wrap && (wrap.tagName === 'SELECT' ? wrap : wrap.querySelector('select'));
+      const el = bound(`player.${name.replace(/^player/, '').toLowerCase()}$`) ||
+                 deepQuery(`#${name}`) ||
+                 deepQuery(`[name="${name}"]`);
+      const sel = el && (el.tagName === 'SELECT' ? el : el.querySelector('select'));
       if (sel && sel.value !== 'true') {
         setReactiveValue(sel, 'true');
         log('enabled toggle', name);
@@ -597,7 +618,7 @@
     //    (Hasty/Daring Touch) are already equivalent — don't fight Thiria.
     if (entry.action && !isUnsupported(entry.action) &&
         !actionsCompatible(rowActionName(row), entry.action)) {
-      if (!isShown(actionSelect(row))) row.querySelector('.edit')?.click();
+      if (!isShown(actionSelect(row))) editButton(row)?.click();
       const sel = await waitFor(() => {
         const s = actionSelect(row);
         return s && isShown(s) && !s.disabled ? s : null;
@@ -674,7 +695,7 @@
       have: { action: rowActionName(row), result: rowResult(row) },
       want: entry,
     });
-    row.querySelector('.edit')?.click(); // clears the result, enables the selects
+    editButton(row)?.click(); // clears the result, enables the selects
     await sleep(CONFIG.pollIntervalMs);
     await driveRow(row, entry);
   }
@@ -685,7 +706,7 @@
   function publishSuggestion() {
     const open = stepRows().filter((r) => !rowFinished(r));
     if (!open.length) return;
-    const name = rowActionName(open[open.length - 1]);
+    const name = rowActionName(open[0]);
     if (name && name !== lastSentAction) sendAction(name);
   }
 
