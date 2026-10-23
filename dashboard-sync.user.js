@@ -1,813 +1,754 @@
 // ==UserScript==
 // @name         Dashboard <-> Local Bridge
 // @namespace    https://github.com/wirumn/CraftCast
-// @version      3.2.0
-// @description  Two-way sync between a local WebSocket app (127.0.0.1:8014) and the Thiria crafting solver.
+// @version      3.3.2
+// @description  Reconcile CraftCast history with the Thiria crafting solver.
 // @author       you
 // @match        https://thiria.com/expert/*
 // @run-at       document-start
 // @grant        none
 // ==/UserScript==
 
-/*
- * Architecture (v3): the plugin is the single source of truth. Every message
- * carries the FULL action history of the current craft — which action the
- * player actually used, the condition rolled afterwards, and success/failure.
- * This script is a stateless-ish RECONCILER: on every message (and on relevant
- * DOM changes) it converges Thiria's step list to that history:
- *
- *   - new session id        -> reset the solver, apply player/recipe config
- *   - history entry i       -> Thiria step row i: fix the action (edit pencil)
- *                              if the player deviated from the suggestion, set
- *                              the rolled condition, click Success/Failure
- *   - newest unfinished row -> scrape "Use X." and send it back as next_action
- *
- * Because reconciliation is idempotent and driven by the full document, a
- * dropped frame, a slow solver, or a reconnect can no longer skip steps or
- * confirm actions the player never performed.
- */
-
-(function () {
+(() => {
   'use strict';
 
-  // ===========================================================================
-  // Config
-  // ===========================================================================
   const CONFIG = {
     wsUrl: 'ws://127.0.0.1:8014',
-
-    pollIntervalMs: 80,
-    pollTimeoutMs: 4000,
-    // Expert solves can take a while; give new rows more headroom.
-    solverRowTimeoutMs: 12000,
-    reconcileDebounceMs: 120,
-    repairAttemptsPerRow: 2,
-    driveAttemptsPerRow: 4,
-
-    reconnect: { baseDelayMs: 1000, maxDelayMs: 30000, factor: 2, jitterRatio: 0.25 },
-    heartbeat: { intervalMs: 15000, timeoutMs: 30000 },
+    pollMs: 80,
+    waitMs: 4000,
+    solveMs: 12000,
+    debounceMs: 100,
+    retryMs: 1000,
+    maxFailures: 4,
+    pingMs: 15000,
+    pongMs: 30000,
+    // null preserves the page setting. Use only values known for your character/recipe.
+    relic: null,      // 'none' | 'splendorous' (Cosmic 9+)
+    actionMode: null, // 'default' | 'all' | 'none' (Stellar actions)
   };
 
-  // Actions that require a player toggle in Thiria before they appear in the
-  // action list at all.
-  const MANIPULATION_ACTION = 'manipulation';
-  const SPECIALIST_ACTIONS = new Set(['heart and soul', 'careful observation', 'quick innovation']);
+  const SPECIALIST = new Set(['heartandsoul', 'carefulobservation', 'quickinnovation']);
 
-  const log  = (...a) => console.debug('[bridge]', ...a);
-  const warn = (...a) => console.warn('[bridge]', ...a);
+  // Actions Thiria/the game treat as the same slot. A name mismatch between
+  // them must not trigger an endless edit/re-drive loop. Daring Touch is the
+  // in-game upgrade of Hasty Touch (fires when Expedience is active).
+  const ACTION_ALIASES = [['hastytouch', 'daringtouch']];
 
-  // ===========================================================================
-  // State
-  // ===========================================================================
-  let socket = null;
-  let reconnectAttempts = 0;
-  let reconnectTimer = null;
-  let manualClose = false;
-  let heartbeatTimer = null;
-  let lastPongAt = 0;
+  // Actions Thiria's solver does not simulate at all. They consume no step row
+  // in Thiria, so the reconciler skips them entirely to keep subsequent steps
+  // aligned 1:1. (Material Miracle is a cosmic Duty Action condition buff).
+  const KNOWN_UNSUPPORTED = new Set(['materialmiracle']);
 
-  let pendingAction = null;
-  let lastSentAction = null;
+  const key = (name) => String(name ?? '').toLowerCase().replace(/[^a-z0-9]/g, '')
+    .replace(/^wastenotii$/, 'wastenot2');
 
-  let doc = null;                 // latest state document from the plugin
-  let appliedSession = -1;        // session whose config/reset has been applied
-  const repairAttempts = new Map(); // row index -> repair count for this session
-  const driveFailures = new Map();  // row index -> consecutive failed drives
-  const unsupportedActions = new Set(); // actions Thiria's solver can't represent
-  const skipNoted = new Set();          // history indices we've logged as skipped
-
-  let reconciling = false;
-  let rerunRequested = false;
-  let reconcileTimer = null;
-
-  // Manual-control latch: when paused, the bridge touches nothing on the page
-  // (no Start/Reset, no config, no Success/Failure clicks), so you can edit
-  // Thiria's steps by hand. It still reports state and the suggestion. Toggle
-  // via the status pill or Ctrl+Shift+P.
-  let paused = false;
-
-  // ===========================================================================
-  // Shadow-DOM-aware queries
-  // ===========================================================================
-  function deepQueryAll(selector, root = document) {
-    const out = [];
-    const visit = (node) => {
-      if (!node.querySelectorAll) return;
-      node.querySelectorAll(selector).forEach((el) => out.push(el));
-      node.querySelectorAll('*').forEach((el) => { if (el.shadowRoot) visit(el.shadowRoot); });
-    };
-    visit(root);
-    return out;
+  function actionsCompatible(a, b) {
+    const ka = key(a), kb = key(b);
+    if (ka === kb) return true;
+    return ACTION_ALIASES.some((g) => g.includes(ka) && g.includes(kb));
   }
-  const deepQuery = (selector, root = document) => deepQueryAll(selector, root)[0] || null;
 
-  // ===========================================================================
-  // WebSocket transport
-  // ===========================================================================
-  function computeBackoff() {
-    const { baseDelayMs, maxDelayMs, factor, jitterRatio } = CONFIG.reconnect;
-    const raw = Math.min(maxDelayMs, baseDelayMs * Math.pow(factor, reconnectAttempts));
-    const jitter = raw * jitterRatio * (Math.random() * 2 - 1);
-    return Math.max(0, Math.round(raw + jitter));
+  const warn = (...args) => console.warn('[bridge]', ...args);
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  const cancelled = Symbol('cancelled');
+
+  let socket = null;
+  let reconnectTimer, heartbeatTimer, reconcileTimer;
+  let reconnectAttempts = 0, lastPongAt = 0;
+  let stopped = false, paused = false, running = false, rerun = false;
+  let doc = null, stateKey = '', appliedSession = null, lastSent = '';
+  let failures = 0;
+  let statusEl, statusLabel, statusToggle, statusDot;
+  let connectionNote = 'Connecting…', targetNote = '';
+  let rowsDirty = true, cachedRows = [];
+  const indexedRows = new Map();
+  const inferredSettings = new Map();
+  const unsupportedActions = new Set();
+
+  // Observe discovered open roots, including roots on newly inserted hosts.
+  // Thiria currently places its controls in light DOM under slotted components.
+  const roots = new Set();
+  const observer = new MutationObserver((records) => {
+    let relevant = false;
+    for (const record of records) {
+      if (statusEl?.contains(record.target)) continue;
+      relevant = true;
+      for (const node of record.addedNodes) discoverRoots(node);
+    }
+    if (relevant) {
+      rowsDirty = true;
+      pruneRoots();
+      schedule();
+    }
+  });
+
+  const observe = (root) => observer.observe(root, {
+    childList: true, subtree: true, characterData: true, attributes: true,
+    attributeFilter: ['class', 'disabled', 'hidden', 'value'],
+  });
+
+  let shadowHook = null, previousAttachShadow = null;
+  function hookShadowRoots() {
+    const original = Element.prototype.attachShadow;
+    previousAttachShadow = original;
+    shadowHook = function (...args) {
+      const root = Reflect.apply(original, this, args);
+      if (!stopped && root.mode === 'open') {
+        roots.add(root);
+        observe(root);
+        rowsDirty = true;
+        schedule();
+      }
+      return root;
+    };
+    Element.prototype.attachShadow = shadowHook;
+  }
+
+  function discoverRoots(node) {
+    if (node.shadowRoot && !roots.has(node.shadowRoot)) {
+      roots.add(node.shadowRoot);
+      observe(node.shadowRoot);
+      discoverRoots(node.shadowRoot);
+    }
+    for (const el of node.querySelectorAll?.('*') || []) {
+      if (el.shadowRoot) discoverRoots(el);
+    }
+  }
+
+  function pruneRoots() {
+    let removed = false;
+    for (const root of roots) {
+      if (root !== document && !root.host.isConnected) {
+        roots.delete(root);
+        removed = true;
+      }
+    }
+    if (removed) {
+      observer.disconnect();
+      for (const root of roots) observe(root);
+    }
+  }
+
+  function query(selector, root) {
+    if (root) {
+      const found = root.querySelector(selector);
+      if (found) return found;
+      if (root.shadowRoot) {
+        const nested = query(selector, root.shadowRoot);
+        if (nested) return nested;
+      }
+      for (const el of root.querySelectorAll('*')) {
+        if (el.shadowRoot) {
+          const nested = query(selector, el.shadowRoot);
+          if (nested) return nested;
+        }
+      }
+      return null;
+    }
+    for (const scope of roots) {
+      const found = scope.querySelector(selector);
+      if (found) return found;
+    }
+    return null;
+  }
+
+  function shown(el) {
+    if (!el?.isConnected) return false;
+    for (let node = el; node; node = node.parentElement || node.getRootNode().host) {
+      if (node.hidden || node.classList?.contains('hidden')) return false;
+    }
+    return true;
+  }
+
+  const usable = (el) => shown(el) && !el.disabled;
+  const bound = (binding) => query(`[x-bind-value="${binding}"]`);
+
+  // Preserve the compatibility sequence recorded in CraftCast commit 817a871.
+  // Ordinary assignment lets element-level setters participate; never bypass
+  // them with a native prototype setter. Restore the user's previous focus.
+  function setValue(el, value) {
+    if (!el || value == null || String(el.value) === String(value)) return !!el;
+    const option = el.tagName === 'SELECT' && Array.from(el.options)
+      .find((option) => option.value === String(value) && !option.disabled);
+    if (el.tagName === 'SELECT' && !option) return false;
+    let active = document.activeElement;
+    while (active?.shadowRoot?.activeElement) active = active.shadowRoot.activeElement;
+    try {
+      el.focus({ preventScroll: true });
+      if (option) el.selectedIndex = option.index;
+      el.value = String(value);
+      rowsDirty = true;
+      el.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+    } finally {
+      el.blur();
+      if (active?.isConnected && active !== document.body) active.focus?.({ preventScroll: true });
+    }
+    return String(el.value) === String(value);
+  }
+
+  function check(d) {
+    if (stopped || paused || doc !== d || socket?.readyState !== WebSocket.OPEN) throw cancelled;
+  }
+
+  async function waitFor(read, d, message, timeout = CONFIG.waitMs) {
+    const deadline = Date.now() + timeout;
+    for (;;) {
+      check(d);
+      const value = read();
+      if (value) return value;
+      if (Date.now() >= deadline) throw new Error(message);
+      await sleep(CONFIG.pollMs);
+    }
+  }
+
+  function validState(value) {
+    if (!value || value.type !== 'state' || !Number.isSafeInteger(value.session) || value.session < 0 ||
+        !['active', 'complete'].includes(value.status) || typeof value.fromStart !== 'boolean' ||
+        !Array.isArray(value.steps) || !value.player || !value.recipe) return false;
+    return value.steps.every((entry) => entry &&
+      (entry.action == null || typeof entry.action === 'string') &&
+      (entry.condition == null || typeof entry.condition === 'string') &&
+      (entry.success == null || typeof entry.success === 'boolean'));
+  }
+
+  function receive(raw) {
+    let value;
+    try { value = JSON.parse(raw); } catch { return; }
+    if (value?.type === 'pong') { lastPongAt = Date.now(); return; }
+    if (!validState(value)) return;
+    const nextKey = JSON.stringify(value);
+    if (stateKey !== nextKey) {
+      doc = value;
+      stateKey = nextKey;
+      failures = 0;
+    }
+    schedule();
   }
 
   function connect() {
+    if (stopped) return;
     clearTimeout(reconnectTimer);
-    setStatus('reconnecting', 'Connecting…');
-    try {
-      socket = new WebSocket(CONFIG.wsUrl);
-    } catch (e) {
-      warn('socket construct failed', e);
-      scheduleReconnect();
-      return;
-    }
-
-    socket.addEventListener('open', () => {
+    setConnection('Connecting…');
+    let ws;
+    try { ws = new WebSocket(CONFIG.wsUrl); }
+    catch (error) { warn('WebSocket unavailable', error); reconnect(); return; }
+    socket = ws;
+    ws.addEventListener('open', () => {
+      if (socket !== ws || stopped) return;
       reconnectAttempts = 0;
-      setStatus('connected', 'Connected');
-      startHeartbeat();
-      if (pendingAction !== null && pendingAction !== lastSentAction) sendAction(pendingAction);
+      lastPongAt = Date.now();
+      setConnection('Connected');
+      heartbeatTimer = setInterval(() => {
+        if (socket !== ws || ws.readyState !== WebSocket.OPEN) return;
+        if (Date.now() - lastPongAt >= CONFIG.pongMs) { ws.close(); return; }
+        try { ws.send('{"type":"ping"}'); } catch { ws.close(); }
+      }, CONFIG.pingMs);
     });
-    socket.addEventListener('message', (ev) => handleIncoming(ev.data));
-    socket.addEventListener('close', () => {
-      stopHeartbeat();
-      // The last send may have died in the closing socket's buffer; forget it
-      // so the suggestion is re-sent after reconnecting.
-      lastSentAction = null;
-      if (manualClose) setStatus('disconnected', 'Disconnected');
-      else scheduleReconnect();
+    ws.addEventListener('message', (event) => {
+      if (socket === ws && !stopped) receive(event.data);
     });
-    socket.addEventListener('error', () => { try { socket.close(); } catch (_) {} });
+    ws.addEventListener('close', () => {
+      if (socket !== ws) return;
+      clearInterval(heartbeatTimer);
+      socket = null;
+      doc = null;
+      stateKey = '';
+      appliedSession = null;
+      lastSent = '';
+      if (!stopped) reconnect();
+    });
+    ws.addEventListener('error', () => { if (socket === ws) ws.close(); });
   }
 
-  function scheduleReconnect() {
-    const delay = computeBackoff();
-    reconnectAttempts++;
-    setStatus('reconnecting', `Reconnecting [Attempt ${reconnectAttempts}]`);
+  function reconnect() {
+    if (stopped) return;
+    const base = Math.min(30000, 1000 * 2 ** Math.min(reconnectAttempts++, 5));
+    const delay = Math.min(30000, Math.round(base * (0.75 + Math.random() * 0.5)));
+    setConnection('Reconnecting…');
     clearTimeout(reconnectTimer);
     reconnectTimer = setTimeout(connect, delay);
   }
 
-  function sendAction(name) {
-    pendingAction = name;
-    if (!socket || socket.readyState !== WebSocket.OPEN) return;
-    try {
-      socket.send(JSON.stringify({ next_action: name }));
-      lastSentAction = name;
-      log('sent next_action', name);
-    } catch (e) {
-      warn('send failed', e);
+  const startButton = () => query('button[x-event-click="start"]');
+  function solverStarted() {
+    const started = query('#host')?.context?.started;
+    return typeof started === 'boolean' ? started :
+      rows().length > 0 || /reset/i.test(startButton()?.textContent || '');
+  }
+
+  function rows() {
+    if (!rowsDirty) return cachedRows;
+    const container = query('.stepsContainer');
+    cachedRows = container ? Array.from(container.children)
+      .map((el) => el.matches('cm-group') ? el : query('cm-group', el)).filter(Boolean) : [];
+    indexedRows.clear();
+    for (const row of cachedRows) {
+      const label = query('[slot="header"] [x-bind-text-content="index$"]', row);
+      const legacy = query('[slot="header"]', row)?.textContent.match(/#\s*(\d+)/);
+      const index = label ? Number(label.textContent) : Number(legacy?.[1]);
+      if (Number.isSafeInteger(index) && index > 0) indexedRows.set(index, row);
     }
+    rowsDirty = false;
+    return cachedRows;
   }
 
-  function startHeartbeat() {
-    stopHeartbeat();
-    lastPongAt = Date.now();
-    heartbeatTimer = setInterval(() => {
-      if (!socket || socket.readyState !== WebSocket.OPEN) return;
-      if (Date.now() - lastPongAt > CONFIG.heartbeat.timeoutMs) {
-        warn('heartbeat timeout — forcing reconnect');
-        try { socket.close(); } catch (_) {}
-        return;
-      }
-      try { socket.send(JSON.stringify({ type: 'ping' })); } catch (e) { warn('ping failed', e); }
-    }, CONFIG.heartbeat.intervalMs);
-  }
-  function stopHeartbeat() { if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; } }
+  function rowAt(index) { rows(); return indexedRows.get(index) || null; }
+  const actionSelect = (row) => query('select[xu-action-options], select[name="stepAction"]', row);
+  const conditionSelect = (row) => query('select[x-bind-value="condition$"], select[name="stepCondition"]', row);
+  const editButton = (row) => query('[x-event-click="edit"]', row);
+  const resultButton = (row, result) => query(`[x-event-click="finish,a=${result}"]`, row);
 
-  function handleIncoming(raw) {
-    let msg;
-    try { msg = JSON.parse(raw); } catch (_) { return; }
-    if (!msg || typeof msg !== 'object') return;
-
-    if (msg.type === 'pong') { lastPongAt = Date.now(); return; }
-    if (msg.type !== 'state') return;
-
-    doc = msg;
-    log(`── state: session=${msg.session} status=${msg.status} step=${msg.current?.step} ` +
-        `cond=${msg.current?.condition} history=${(msg.steps || []).length}`);
-    scheduleReconcile();
-  }
-
-  // ===========================================================================
-  // Generic DOM helpers
-  // ===========================================================================
-  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
-  async function waitFor(fn, timeoutMs = CONFIG.pollTimeoutMs) {
-    const deadline = Date.now() + timeoutMs;
-    for (;;) {
-      let value = null;
-      try { value = fn(); } catch (_) { /* DOM in flux */ }
-      if (value) return value;
-      if (Date.now() >= deadline) return null;
-      await sleep(CONFIG.pollIntervalMs);
-    }
-  }
-
-  const isShown = (el) => !!el && !el.closest('.hidden');
-
-  function selectOption(select, value) {
-    const v = String(value);
-    const vl = v.toLowerCase();
-    const opts = Array.from(select.options);
-    let idx = opts.findIndex((o) => o.value === v);
-    if (idx === -1) idx = opts.findIndex((o) => o.value.toLowerCase() === vl);
-    if (idx === -1) idx = opts.findIndex((o) => o.textContent.trim().toLowerCase() === vl);
-    if (idx === -1) return false;
-    select.selectedIndex = idx;
-    select.value = opts[idx].value;
-    return true;
-  }
-
-  function setReactiveValue(el, value) {
-    el.focus();
-    if (el.tagName === 'SELECT') {
-      if (!selectOption(el, value)) { warn('no option matches', value, 'on', el); return false; }
-    } else {
-      el.value = value;
-    }
-    el.dispatchEvent(new Event('input',  { bubbles: true, composed: true }));
-    el.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
-    el.blur();
-    return true;
-  }
-
-  /**
-   * Select an action by its display name ("Muscle Memory"). Thiria option
-   * values are camelCase keys, option text is the display name — match both.
-   */
-  function setSelectByActionName(select, name) {
-    const wanted = name.trim().toLowerCase();
-    const wantedKey = wanted.replace(/[^a-z0-9]/g, '');
-    const opt = Array.from(select.options).find((o) =>
-      o.textContent.trim().toLowerCase() === wanted ||
-      o.value.toLowerCase() === wantedKey);
-    if (!opt) return false;
-    return setReactiveValue(select, opt.value);
-  }
-
-  const sameName = (a, b) =>
-    (a || '').trim().toLowerCase() === (b || '').trim().toLowerCase();
-
-  // Actions Thiria/the game treat as the same slot, so a name mismatch between
-  // them must not trigger an endless re-drive. Daring Touch is the upgrade of
-  // Hasty Touch (fires when Expedience is active).
-  const ACTION_ALIASES = [['hasty touch', 'daring touch']];
-
-  // Actions Thiria's solver doesn't model at all. They occupy no Thiria step
-  // row, so the reconciler skips them entirely — keeping every later step
-  // aligned 1:1. (Material Miracle is a cosmic, step-free condition buff; the
-  // good conditions it forces still reach Thiria via the next action's row.)
-  const KNOWN_UNSUPPORTED = new Set(['material miracle']);
-  const isKnownUnsupported = (name) => KNOWN_UNSUPPORTED.has((name || '').trim().toLowerCase());
-  function actionsCompatible(a, b) {
-    if (sameName(a, b)) return true;
-    const x = (a || '').trim().toLowerCase();
-    const y = (b || '').trim().toLowerCase();
-    return ACTION_ALIASES.some((g) => g.includes(x) && g.includes(y));
-  }
-
-  // ===========================================================================
-  // Thiria accessors
-  // ===========================================================================
-
-  // The Start/Reset button: label is "Start" before the solver runs, "Reset" after.
-  function startResetButton() {
-    return deepQuery('button[x-event-click="start"]') ||
-      deepQuery('button.label.solve') ||
-      deepQueryAll('button').find((b) => {
-        const t = b.textContent.trim();
-        return t === 'Start' || t === 'Reset';
-      }) || null;
-  }
-
-  // Thiria's x-items stamps each step inside an <x-item-host> wrapper, so the
-  // container's children are hosts, not the cm-group rows themselves.
-  function stepRows() {
-    const container = deepQuery('.stepsContainer');
-    if (!container) return [];
-    return Array.from(container.children)
-      .map((el) => (el.tagName === 'CM-GROUP' ? el : el.querySelector('cm-group')))
-      .filter(Boolean);
-  }
-
-  function rowIndex(row) {
-    const header = row.querySelector('[slot="header"]');
-    const m = header && header.textContent.match(/#\s*(\d+)/);
-    return m ? parseInt(m[1], 10) : -1;
-  }
-
-  function rowByIndex(n) {
-    const rows = stepRows();
-    return rows.find((r) => rowIndex(r) === n) || rows[n - 1] || null;
-  }
-
-  // "Use <span>NAME</span>." — the inner span carries the action name.
-  function rowActionName(row) {
-    const span = row.querySelector('.steptext .bold span') ||
-                 row.querySelector('.steptext .bold') ||
-                 row.querySelector('.steptext span');
-    if (!span) return '';
-    return span.textContent.replace(/^Use\s+/i, '').replace(/\.$/, '').trim();
-  }
-
-  function editButton(row) {
-    return row.querySelector('button[x-event-click="edit"]') ||
-      row.querySelector('button[title*="Edit"]') ||
-      row.querySelector('.edit') ||
-      row.querySelector('.stepbutton button') || null;
-  }
-
-  function actionSelect(row) {
-    return row.querySelector('select[name="stepAction"]') ||
-      row.querySelector('select[xu-action-options]') ||
-      Array.from(row.querySelectorAll('select'))
-        .find((s) => !s.querySelector('option[value="normal"]')) || null;
-  }
-
-  function conditionSelect(row) {
-    return row.querySelector('select[name="stepCondition"]') ||
-      row.querySelector('select[x-bind-value="condition$"]') ||
-      Array.from(row.querySelectorAll('select'))
-        .find((s) => s.querySelector('option[value="normal"]')) || null;
-  }
-
-  function resultButton(row, text) {
-    const t = text.toLowerCase();
-    return Array.from(row.querySelectorAll('button.result, button.solve, button'))
-      .find((b) => b.textContent.toLowerCase().includes(t) || b.getAttribute('x-event-click')?.toLowerCase().includes(t)) || null;
-  }
-
-  // 'success' | 'failure' | null — Thiria marks the clicked button with a class.
   function rowResult(row) {
-    if (resultButton(row, 'Success')?.classList.contains('success')) return 'success';
-    if (resultButton(row, 'Failure')?.classList.contains('failure')) return 'failure';
+    if (resultButton(row, 'success')?.classList.contains('success')) return 'success';
+    if (resultButton(row, 'failure')?.classList.contains('failure')) return 'failure';
     return null;
   }
-  const rowFinished = (row) => rowResult(row) !== null;
 
-  // ===========================================================================
-  // Solver configuration (player stats + recipe)
-  // ===========================================================================
-  function setNamedInput(el, value) {
-    if (!el || value === undefined || value === null || value === '' || value === 0) return;
-    if (String(el.value) === String(value)) return;
-    setReactiveValue(el, value);
-    log('config', el.getAttribute('x-bind-value') || el.name || el.id, '->', value);
+  function actionOption(select, name) {
+    return Array.from(select?.options || []).find((option) => !option.disabled &&
+      (key(option.value) === key(name) || key(option.textContent) === key(name)));
   }
 
-  // Target inputs by their reactive binding — names are ambiguous or prefixed
-  // by panel in newer Thiria releases (playerLevel vs itemLevel).
-  const bound = (binding) =>
-    deepQuery(`input[x-bind-value="${binding}"], select[x-bind-value="${binding}"]`);
-
-  /**
-   * The numeric stat fields, written only when they differ from the payload.
-   * Runs on EVERY reconcile pass, not just at session start: Thiria restores
-   * form state from the URL bookmark on load/reset, which can resurrect stale
-   * values after the one-time config already ran.
-   */
-  function enforceStats(d) {
-    const p = d.player || {};
-    const r = d.recipe || {};
-
-    setNamedInput(bound('player.level$') || deepQuery('#playerLevel') || deepQuery('input[name="playerLevel"]'), p.level);
-    setNamedInput(bound('player.cp$') || deepQuery('#playerCP') || deepQuery('input[name="playerCP"]') || deepQuery('input[name="cp"]'), p.cp);
-    setNamedInput(bound('player.craftsmanship$') || deepQuery('#playerCraftsmanship') || deepQuery('input[name="playerCraftsmanship"]') || deepQuery('input[name="craftsmanship"]'), p.craftsmanship);
-    setNamedInput(bound('player.control$') || deepQuery('#playerControl') || deepQuery('input[name="playerControl"]') || deepQuery('input[name="control"]'), p.control);
-
-    setNamedInput(bound('item.level$') || deepQuery('#itemLevel') || deepQuery('input[name="itemLevel"]'), r.level);
-    setNamedInput(bound('item.durability$') || deepQuery('#itemDurability') || deepQuery('input[name="itemDurability"]') || deepQuery('input[name="durability"]'), r.durability);
-    setNamedInput(bound('item.progress$') || deepQuery('#itemProgress') || deepQuery('input[name="itemProgress"]') || deepQuery('input[name="progress"]'), r.progress);
-    setNamedInput(bound('item.quality$') || deepQuery('#itemQuality') || deepQuery('input[name="itemQuality"]') || deepQuery('input[name="quality"]'), r.quality);
-  }
-
-  function logLevelFields() {
-    const pl = bound('player.level$') || deepQuery('#playerLevel');
-    const il = bound('item.level$') || deepQuery('#itemLevel');
-    log(`level check: Player panel=${pl ? pl.value : 'n/a'} (should be your character level), ` +
-        `Item panel=${il ? il.value : 'n/a'} (recipe rlvl, >100 is normal)`);
-  }
-
-  /**
-   * Returns true only when the form existed and the document carried real
-   * values — early broadcasts of a session can have zeroed stats while the
-   * plugin's addon reads settle, and the page itself may not be built yet.
-   * The caller retries until this succeeds. A zero player level blocks too:
-   * Thiria only applies the recipe's level penalty when the player level is
-   * right, and simulating without it skews every bar by 10-25%.
-   */
-  async function applyConfig(d) {
-    const p = d.player || {};
-    const r = d.recipe || {};
-
-    enforceStats(d);
-    logLevelFields();
-
-    const rating = bound('item.profile$') || deepQuery('#itemRating') || deepQuery('select[name="itemRating"]');
-    if (rating && r.rating && rating.value !== r.rating) setReactiveValue(rating, r.rating);
-
-    // Thiria derives its hidden divisors and level penalties from a list of
-    // known items. When it doesn't recognize this one (the ⚠️ next to Rating),
-    // those are guesses — switch to Custom and feed the exact values from the
-    // game's recipe sheet (Thiria wants them as sheet-value / 100).
-    if (rating && r.progressDivider > 0) {
-      await sleep(150); // let the framework re-evaluate item recognition
-      const unknownMark = deepQuery('label[for="itemRating"] span[title*="not correspond to a known item"]') ||
-                          deepQuery('label[for="itemRating"] span.baseline') ||
-                          deepQuery('label[for="itemRating"] span:not(.hidden) span[translate="no"]');
-      if (unknownMark && isShown(unknownMark) && rating.value !== 'custom') {
-        setReactiveValue(rating, 'custom');
-        setNamedInput(bound('item.progressDivisor$') || deepQuery('#itemProgressDivisor'), r.progressDivider / 100);
-        setNamedInput(bound('item.progressLevelAdjustment$') || deepQuery('#itemProgressLevelAdjustment'), r.progressModifier / 100);
-        setNamedInput(bound('item.qualityDivisor$') || deepQuery('#itemQualityDivisor'), r.qualityDivider / 100);
-        setNamedInput(bound('item.qualityLevelAdjustment$') || deepQuery('#itemQualityLevelAdjustment'), r.qualityModifier / 100);
-        log('item unknown to Thiria — applied exact recipe-sheet parameters via Custom rating');
-      }
-    }
-
-    const craftInput = bound('player.craftsmanship$') ||
-                       deepQuery('#playerCraftsmanship') ||
-                       deepQuery('input[name="playerCraftsmanship"]') ||
-                       deepQuery('input[name="craftsmanship"]');
-
-    return !!(craftInput && p.level > 0 && p.craftsmanship > 0 && r.progress > 0);
-  }
-
-  /**
-   * If the player used Manipulation or a specialist action, the matching
-   * Thiria toggle must be "Allowed" or the action won't exist in the action
-   * list. The toggles are <select>s with true/false options inside a named
-   * wrapper div. Run BEFORE driving rows: changing one recalculates and
-   * replaces the active row.
-   */
-  function applyUnlockToggles(d) {
-    const used = (d.steps || []).map((s) => (s.action || '').toLowerCase());
-    const ensure = (name) => {
-      const el = bound(`player.${name.replace(/^player/, '').toLowerCase()}$`) ||
-                 deepQuery(`#${name}`) ||
-                 deepQuery(`[name="${name}"]`);
-      const sel = el && (el.tagName === 'SELECT' ? el : el.querySelector('select'));
-      if (sel && sel.value !== 'true') {
-        setReactiveValue(sel, 'true');
-        log('enabled toggle', name);
-      }
-    };
-    if (used.includes(MANIPULATION_ACTION)) ensure('playerManipulation');
-    if (used.some((a) => SPECIALIST_ACTIONS.has(a))) ensure('playerSpecialist');
-  }
-
-  // ===========================================================================
-  // Reconciler
-  // ===========================================================================
-  function scheduleReconcile() {
-    clearTimeout(reconcileTimer);
-    reconcileTimer = setTimeout(reconcile, CONFIG.reconcileDebounceMs);
-  }
-
-  async function reconcile() {
-    if (reconciling) { rerunRequested = true; return; }
-    reconciling = true;
-    try {
-      await reconcileOnce();
-    } catch (e) {
-      warn('reconcile failed', e);
-    } finally {
-      reconciling = false;
-      if (rerunRequested) { rerunRequested = false; scheduleReconcile(); }
-    }
-  }
-
-  async function reconcileOnce() {
-    const d = doc;
-    if (!d) return;
-
-    if (paused) {
-      // Hands off the page — let the user drive Thiria manually. Still surface
-      // the current suggestion so the in-game overlay keeps updating.
-      setTargetNote('paused — manual control (click to resume)');
-      publishSuggestion();
-      return;
-    }
-
-    if (!d.fromStart) {
-      // Plugin attached mid-craft: history is incomplete, driving the solver
-      // would fabricate steps. Stay hands-off, still surface the suggestion.
-      setTargetNote('attached mid-craft — auto-sync off');
-      publishSuggestion();
-      return;
-    }
-
-    // New craft: reset the solver and push fresh config.
-    if (d.session !== appliedSession) {
-      const btn = startResetButton();
-      if (btn && btn.textContent.trim() === 'Reset' && !btn.disabled) {
-        btn.click();
-        log('reset solver for session', d.session);
-        await sleep(CONFIG.pollIntervalMs);
-      }
-      if (!await applyConfig(d)) {
-        // Form or data not ready — don't latch, don't start: a later
-        // broadcast/mutation re-runs this with complete values. If this never
-        // clears, the plugin is outdated and sending zeroed player stats.
-        setTargetNote('waiting for craft data');
-        return;
-      }
-      appliedSession = d.session;
-      repairAttempts.clear();
-      driveFailures.clear();
-      unsupportedActions.clear();
-      skipNoted.clear();
-      lastSentAction = null;
-    }
-    applyUnlockToggles(d);
-    // Heal stat drift on every pass (Thiria's bookmark restore can resurrect
-    // stale values mid-session); writes happen only when a field differs.
-    enforceStats(d);
-
-    // Make sure the solver is running.
-    if (stepRows().length === 0) {
-      if (d.status !== 'active') {
-        // The craft is over. If the board was reset (manually or by us), leave
-        // it empty instead of resurrecting the finished craft's history — only
-        // a live craft justifies rebuilding rows. Mid-craft resets still
-        // self-heal, because there the status is "active".
-        setTargetNote('');
-        return;
-      }
-      const startBtn = await waitFor(() => {
-        const b = startResetButton();
-        return b && b.textContent.trim() === 'Start' && !b.disabled ? b : null;
-      });
-      if (!startBtn) { setTargetNote('solver not ready'); return; }
-      startBtn.click();
-      log('auto-clicked Start');
-      if (!await waitFor(() => stepRows().length > 0, CONFIG.solverRowTimeoutMs)) {
-        setTargetNote('waiting for solver');
-        return;
-      }
-    }
-
-    // Converge Thiria's rows onto the resolved prefix of the history. Re-read
-    // `doc` each iteration so newly resolved entries are picked up mid-pass.
-    // `rowNum` tracks the Thiria row index separately from the history index:
-    // actions Thiria can't model occupy no row, so skipping them keeps every
-    // later step aligned (no off-by-one).
-    let rowNum = 0;
-    for (let i = 0; ; i++) {
-      if (!doc || doc.session !== d.session) return; // superseded by a new craft
-      const steps = doc.steps || [];
-      if (i >= steps.length) break;
-
-      const entry = steps[i];
-
-      if (entry.action && isKnownUnsupported(entry.action)) {
-        if (!skipNoted.has(i)) {
-          skipNoted.add(i);
-          log(`skipping "${entry.action}" — Thiria can't model it; later steps stay aligned`);
-        }
-        continue; // no Thiria row consumed
-      }
-
-      if (entry.success == null || !entry.condition) break; // outcome not observed yet
-      rowNum++;
-
-      const row = await waitFor(() => rowByIndex(rowNum), CONFIG.solverRowTimeoutMs);
-      if (!row) { setTargetNote(`waiting for solver (step ${rowNum})`); return; }
-
-      if (rowFinished(row)) {
-        if (!rowMatches(row, entry)) await repairRow(row, entry, rowNum);
-        else driveFailures.delete(rowNum);
-        continue;
-      }
-
-      // Stop hammering a row that won't complete (e.g. Thiria rejects an
-      // action switch). Bail until the document changes, instead of letting
-      // DOM mutations from our own clicks re-trigger an infinite drive loop.
-      if ((driveFailures.get(rowNum) || 0) >= CONFIG.driveAttemptsPerRow) {
-        setTargetNote(`step ${rowNum} stuck — switch it manually`);
-        return;
-      }
-
-      setTargetNote(`syncing step ${rowNum}`);
-      if (await driveRow(row, entry)) {
-        driveFailures.delete(rowNum);
-      } else {
-        driveFailures.set(rowNum, (driveFailures.get(rowNum) || 0) + 1);
-        setTargetNote(`step ${rowNum} stuck — see console`);
-        return;
-      }
-    }
-
-    setTargetNote(doc.status === 'complete' ? 'craft complete' : '');
-    publishSuggestion();
-  }
-
-  /**
-   * Complete one Thiria step row from a resolved history entry:
-   * correct the action if the player deviated, set the rolled condition,
-   * then click Success/Failure.
-   */
-  const isUnsupported = (name) =>
-    isKnownUnsupported(name) || unsupportedActions.has((name || '').trim().toLowerCase());
-
-  async function driveRow(row, entry) {
-    // 1. Action: if the player used something other than the suggestion,
-    //    enter edit mode (pencil) and pick the real action. Aliased actions
-    //    (Hasty/Daring Touch) are already equivalent — don't fight Thiria.
-    if (entry.action && !isUnsupported(entry.action) &&
-        !actionsCompatible(rowActionName(row), entry.action)) {
-      if (!isShown(actionSelect(row))) editButton(row)?.click();
-      const sel = await waitFor(() => {
-        const s = actionSelect(row);
-        return s && isShown(s) && !s.disabled ? s : null;
-      });
-      if (sel) {
-        if (!setSelectByActionName(sel, entry.action)) {
-          // Thiria's solver doesn't model this action (e.g. cosmic-only
-          // Material Miracle). We can't represent it — accept Thiria's own
-          // action for this row, complete it so the craft keeps flowing, and
-          // warn that the simulation will drift from here.
-          unsupportedActions.add(entry.action.trim().toLowerCase());
-          warn(`Thiria can't represent "${entry.action}" — accepting "${rowActionName(row)}" and continuing; sim may drift from this step.`);
-          setTargetNote(`"${entry.action}" unsupported — sim may drift`);
-        }
-      } else {
-        warn('action select never became editable for', entry.action);
-      }
-    }
-
-    // 2. Condition rolled after the action (hidden for buff-only actions).
-    const condSel = conditionSelect(row);
-    if (entry.condition && condSel && isShown(condSel) && condSel.value !== entry.condition) {
-      const enabled = await waitFor(() => (!condSel.disabled ? condSel : null));
-      if (enabled) setReactiveValue(condSel, entry.condition);
-      else warn('condition select stayed disabled');
-    }
-
-    // 3. Result.
-    const wantText = entry.success === false ? 'Failure' : 'Success';
-    let btn = await waitFor(() => {
-      const b = resultButton(row, wantText);
-      return b && isShown(b) && !b.disabled ? b : null;
-    });
-    if (!btn && wantText === 'Failure') {
-      // Shouldn't happen (only fallible actions report failure), but never wedge.
-      warn('Failure button unavailable; falling back to Success');
-      btn = await waitFor(() => {
-        const b = resultButton(row, 'Success');
-        return b && !b.disabled ? b : null;
-      });
-    }
-    if (!btn) { warn('result button never enabled'); return false; }
-
-    btn.click();
-    log(`clicked ${wantText} on step row #${rowIndex(row)} (${entry.action || 'suggested action'})`);
-    // Only report success if the click actually registered; otherwise the
-    // caller bails and a later reconcile retries this row.
-    return !!(await waitFor(() => rowFinished(row)));
+  function actionMatches(row, name) {
+    const select = actionSelect(row);
+    if (!select) return false;
+    // Direct match by option value or option text
+    const option = actionOption(select, name);
+    if (option && select.value === option.value) return true;
+    // Check aliased compatibility (Hasty Touch <-> Daring Touch)
+    const selectedText = select.selectedOptions[0]?.textContent || '';
+    const selectedVal = select.value || '';
+    return actionsCompatible(selectedVal, name) || actionsCompatible(selectedText, name);
   }
 
   function rowMatches(row, entry) {
-    // Unsupported actions are accepted as-is, so they never trigger a repair loop.
-    if (entry.action && !isUnsupported(entry.action) &&
-        !actionsCompatible(rowActionName(row), entry.action)) return false;
-    const condSel = conditionSelect(row);
-    if (entry.condition && condSel && isShown(condSel) && condSel.value !== entry.condition) return false;
-    const wantResult = entry.success === false ? 'failure' : 'success';
-    return rowResult(row) === wantResult;
+    if (!row) return false;
+    const condition = conditionSelect(row);
+    return actionMatches(row, entry.action) &&
+      (!shown(condition) || condition.value === entry.condition) &&
+      rowResult(row) === (entry.success ? 'success' : 'failure') &&
+      !row.classList.contains('error');
   }
 
-  /**
-   * A finished row disagrees with what actually happened in game (e.g. it was
-   * clicked manually during a disconnect). Re-open it via the pencil and
-   * re-drive it; every later row resimulates automatically.
-   */
-  async function repairRow(row, entry, index) {
-    const attempts = repairAttempts.get(index) || 0;
-    if (attempts >= CONFIG.repairAttemptsPerRow) {
-      setTargetNote(`step ${index} out of sync`);
+  function suggestionName(row) {
+    // Current Thiria localizes "Use X." as a single text node. The selected
+    // option gives the action itself without scraping translated instructions.
+    const select = actionSelect(row);
+    if (select?.selectedOptions[0]?.value) {
+      return select.selectedOptions[0].textContent.trim();
+    }
+    // Fallback: scrape from .steptext
+    const span = query('.steptext .bold span', row) ||
+                 query('.steptext .bold', row) ||
+                 query('.steptext span', row);
+    if (span) {
+      return span.textContent.replace(/^Use\s+/i, '').replace(/\.$/, '').trim();
+    }
+    return '';
+  }
+
+  const STAT_FIELDS = [
+    ['player.level$', 'player', 'level', false],
+    ['player.cp$', 'player', 'cp', true],
+    ['player.craftsmanship$', 'player', 'craftsmanship', false],
+    ['player.control$', 'player', 'control', true],
+    ['item.level$', 'recipe', 'level', false],
+    ['item.durability$', 'recipe', 'durability', false],
+    ['item.progress$', 'recipe', 'progress', false],
+    ['item.quality$', 'recipe', 'quality', true],
+  ];
+
+  function statsReady(d) {
+    return STAT_FIELDS.every(([, group, field, allowZero]) =>
+      Number.isFinite(d[group][field]) && d[group][field] >= (allowZero ? 0 : 1));
+  }
+
+  function formFields() {
+    const fields = new Map();
+    for (const root of roots) {
+      for (const el of root.querySelectorAll('input[x-bind-value], select[x-bind-value]')) {
+        fields.set(el.getAttribute('x-bind-value'), el);
+      }
+    }
+    return fields;
+  }
+
+  function enforceStats(d, fields) {
+    for (const [binding, group, field] of STAT_FIELDS) {
+      const input = fields.get(binding);
+      if (!input || !setValue(input, d[group][field])) throw new Error(`Waiting for ${binding}`);
+    }
+  }
+
+  function unlocks(d, fields) {
+    const used = new Set(d.steps.map((entry) => key(entry.action)));
+    for (const [field, observed] of [
+      ['manipulation', used.has('manipulation')],
+      ['specialist', [...used].some((action) => SPECIALIST.has(action))],
+    ]) {
+      const supplied = d.player[field];
+      const wanted = observed ? true : supplied;
+      if (typeof wanted !== 'boolean') continue;
+      const binding = `player.${field}$`;
+      const input = fields.get(binding);
+      if (!(observed && supplied !== true ? inferSetting(binding, input, wanted) : setValue(input, wanted))) {
+        throw new Error(`Waiting for ${field} toggle`);
+      }
+    }
+  }
+
+  function inferSetting(binding, input, value) {
+    if (input && String(input.value) !== String(value) && !inferredSettings.has(binding)) {
+      inferredSettings.set(binding, { previous: input.value, applied: String(value) });
+    }
+    return setValue(input, value);
+  }
+
+  function restoreInferredSettings(fields) {
+    for (const [binding, saved] of inferredSettings) {
+      const input = fields.get(binding);
+      if (input?.value === saved.applied) setValue(input, saved.previous);
+    }
+    inferredSettings.clear();
+  }
+
+  function preferences(d, fields) {
+    const relic = d.player.relic ?? CONFIG.relic;
+    if (relic != null && (!['none', 'splendorous'].includes(relic) ||
+        !setValue(fields.get('player.relic$'), relic))) throw new Error('Invalid or unavailable Relic setting');
+    const suppliedMode = d.recipe.actionMode ?? CONFIG.actionMode;
+    if (suppliedMode != null && !['default', 'all', 'none'].includes(suppliedMode)) {
+      throw new Error('Invalid Stellar action mode');
+    }
+    const usedStellar = d.steps.some((entry) => key(entry.action) === 'stellarsteadyhand');
+    const mode = usedStellar ? 'all' : suppliedMode;
+    const input = fields.get('item.actionMode$');
+    if (mode != null && !(usedStellar && suppliedMode !== 'all' ?
+        inferSetting('item.actionMode$', input, mode) : setValue(input, mode))) {
+      throw new Error('Stellar action mode unavailable');
+    }
+  }
+
+  async function configure(d) {
+    if (!statsReady(d)) throw new Error('Waiting for complete player/recipe data');
+    const fields = formFields();
+    restoreInferredSettings(fields);
+    enforceStats(d, fields);
+    unlocks(d, fields);
+    preferences(d, fields);
+    const rating = fields.get('item.profile$');
+    if (!rating) throw new Error('Waiting for recipe rating');
+    const exact = ['progressDivider', 'qualityDivider', 'progressModifier', 'qualityModifier']
+      .every((field) => Number.isFinite(d.recipe[field]) && d.recipe[field] > 0);
+    if (d.recipe.rating && !setValue(rating, d.recipe.rating)) {
+      throw new Error(`Unsupported recipe rating: ${d.recipe.rating}`);
+    }
+    await sleep(CONFIG.pollMs);
+    check(d);
+    const unknown = query('label[for="itemRating"] [x-class-hidden="item.conditionKnown$"], ' +
+      'label[for="itemRating"] [title*="not correspond to a known item"]');
+    if (rating.value === 'custom' || shown(unknown)) {
+      if (!exact) throw new Error('Exact recipe parameters unavailable');
+      if (!setValue(rating, 'custom')) throw new Error('Custom recipe mode unavailable');
+      const custom = [
+        ['progressDivisor', 'progressDivider'], ['progressLevelAdjustment', 'progressModifier'],
+        ['qualityDivisor', 'qualityDivider'], ['qualityLevelAdjustment', 'qualityModifier'],
+      ];
+      for (const [binding, field] of custom) {
+        const input = await waitFor(() => bound(`item.${binding}$`), d, 'Waiting for Custom recipe fields');
+        check(d);
+        if (!setValue(input, d.recipe[field] / 100)) throw new Error(`Cannot set ${binding}`);
+      }
+    }
+    check(d);
+  }
+
+  function schedule(delay = CONFIG.debounceMs) {
+    if (stopped) return;
+    if (running) { rerun = true; return; }
+    if (reconcileTimer) return;
+    reconcileTimer = setTimeout(reconcile, delay);
+  }
+
+  async function reconcile() {
+    reconcileTimer = null;
+    if (running || stopped || !doc) return;
+    const d = doc;
+    if (paused || !d.fromStart) {
+      setNote(paused ? 'Paused — manual control' : 'Attached mid-craft — auto-sync off');
+      publishManual(d);
       return;
     }
-    repairAttempts.set(index, attempts + 1);
-    warn(`repairing desynced step row #${index}`, {
-      have: { action: rowActionName(row), result: rowResult(row) },
-      want: entry,
-    });
-    editButton(row)?.click(); // clears the result, enables the selects
-    await sleep(CONFIG.pollIntervalMs);
-    await driveRow(row, entry);
+    if (failures >= CONFIG.maxFailures) return;
+    running = true;
+    rerun = false;
+    try {
+      await sync(d);
+      failures = 0;
+    } catch (error) {
+      if (error !== cancelled) {
+        failures++;
+        setNote(`${error.message}${failures >= CONFIG.maxFailures ? ' — Pause/Resume to retry' : ''}`);
+        warn(error.message);
+      }
+    } finally {
+      running = false;
+      if (doc !== d || rerun || failures > 0) {
+        if (failures < CONFIG.maxFailures || doc !== d) schedule(failures ? CONFIG.retryMs : CONFIG.debounceMs);
+      }
+    }
   }
 
-  // ===========================================================================
-  // Outgoing: the newest unfinished row holds the solver's next suggestion
-  // ===========================================================================
-  function publishSuggestion() {
-    const open = stepRows().filter((r) => !rowFinished(r));
-    if (!open.length) return;
-    const name = rowActionName(open[0]);
-    if (name && name !== lastSentAction) sendAction(name);
+  async function sync(d) {
+    check(d);
+    if (d.status === 'complete' && appliedSession !== d.session) { setNote('Craft complete'); return; }
+    if (appliedSession !== d.session) {
+      if (!statsReady(d)) throw new Error('Waiting for complete player/recipe data');
+      const button = await waitFor(() => usable(startButton()) && startButton(), d, 'Solver not ready');
+      check(d);
+      if (solverStarted()) {
+        rowsDirty = true;
+        button.click();
+        await waitFor(() => rows().length === 0, d, 'Waiting for solver reset');
+        await sleep(CONFIG.pollMs);
+        check(d);
+      }
+      await configure(d);
+      check(d);
+      appliedSession = d.session;
+      unsupportedActions.clear();
+      lastSent = '';
+    } else {
+      if (!statsReady(d)) throw new Error('Waiting for complete player/recipe data');
+      const fields = formFields();
+      enforceStats(d, fields);
+      unlocks(d, fields);
+      preferences(d, fields);
+    }
+    if (!rows().length) {
+      if (d.status !== 'active') { setNote('Craft complete'); return; }
+      const ready = await waitFor(() => {
+        if (rows().length || solverStarted()) return true;
+        const button = startButton();
+        return usable(button) && button;
+      }, d, 'Solver not ready');
+      check(d);
+      if (!rows().length && !solverStarted() && ready !== true && usable(ready)) {
+        rowsDirty = true;
+        ready.click();
+      }
+      await waitFor(() => rows().length > 0, d, 'Waiting for solver', CONFIG.solveMs);
+    }
+
+    let index = 0;
+    for (const entry of d.steps) {
+      check(d);
+      // Material Miracle is a step-free cosmic Duty Action that forces a Good condition.
+      // Thiria has no step row for it. Skipping it keeps subsequent rows aligned 1:1.
+      if (entry.action && KNOWN_UNSUPPORTED.has(key(entry.action))) {
+        continue;
+      }
+      if (entry.success == null || !entry.condition) { setNote('Waiting for action outcome'); return; }
+      if (!entry.action) throw new Error('Action was not observed — manual sync required');
+
+      index++;
+      const row = await waitFor(() => rowAt(index), d, `Waiting for solver (step ${index})`, CONFIG.solveMs);
+      check(d);
+      if (!rowMatches(row, entry)) await driveRow(index, entry, d);
+      check(d);
+      if (!rowMatches(rowAt(index), entry) && !unsupportedActions.has(key(entry.action))) {
+        throw new Error(`Step ${index} is out of sync`);
+      }
+    }
+    if (d.status !== 'active') { setNote('Craft complete'); return; }
+
+    const noExtraResults = () => {
+      rows();
+      for (const [number, row] of indexedRows) {
+        if (number > index && rowResult(row)) throw new Error('Solver contains extra completed steps — reset it to resync');
+      }
+    };
+    noExtraResults();
+
+    const next = await waitFor(() => {
+      const row = rowAt(index + 1);
+      return row && !rowResult(row) && !row.classList.contains('error') && suggestionName(row) && row;
+    }, d, 'Waiting for next suggestion', CONFIG.solveMs);
+    check(d);
+    noExtraResults();
+    setNote(d.player.relic == null && CONFIG.relic == null ? 'Synced — verify Relic setting' : 'Synced');
+    sendSuggestion(suggestionName(next), d, index + 1);
   }
 
-  // ===========================================================================
-  // DOM observer — re-reconcile when the solver finishes computing rows
-  // ===========================================================================
-  let observer = null;
-  function attachObserver() {
-    observer = new MutationObserver(() => scheduleReconcile());
-    observer.observe(document.body, { childList: true, subtree: true, characterData: true });
-    scheduleReconcile();
+  async function driveRow(index, entry, d) {
+    const get = () => rowAt(index);
+    let row = get();
+    setNote(`Syncing step ${index}`);
+    if (rowResult(row) || !actionMatches(row, entry.action)) {
+      const select = actionSelect(row);
+      if (rowResult(row) || !usable(select)) {
+        const edit = editButton(row);
+        if (!usable(edit)) throw new Error(`Cannot edit step ${index}`);
+        check(d);
+        rowsDirty = true;
+        edit.click();
+      }
+      const selectReady = await waitFor(() => {
+        row = get();
+        const select = row && actionSelect(row);
+        return usable(select) && !rowResult(row) && select;
+      }, d, `Action selector unavailable (step ${index})`);
+      check(d);
+
+      const option = actionOption(selectReady, entry.action);
+      if (!option) {
+        // If Thiria's solver does not represent this action, accept Thiria's action
+        // for this row so the craft keeps flowing without wedging.
+        unsupportedActions.add(key(entry.action));
+        warn(`Thiria can't represent "${entry.action}" — accepting "${suggestionName(row)}" and continuing; sim may drift.`);
+        setNote(`"${entry.action}" unsupported — sim may drift`);
+      } else if (!setValue(selectReady, option.value)) {
+        throw new Error(`Cannot select ${entry.action}`);
+      } else {
+        await waitFor(() => {
+          row = get();
+          const text = row && query('.steptext', row)?.textContent;
+          return row && actionMatches(row, entry.action) && text?.includes(option.textContent.trim()) && row;
+        }, d, `Action update did not settle (step ${index})`);
+        await sleep(CONFIG.pollMs);
+        check(d);
+      }
+    }
+
+    row = get();
+    let condition = conditionSelect(row);
+    if (shown(condition)) {
+      condition = await waitFor(() => {
+        const select = conditionSelect(get());
+        return usable(select) && select;
+      }, d, `Condition selector unavailable (step ${index})`);
+      check(d);
+      if (!setValue(condition, entry.condition)) throw new Error(`Unsupported condition: ${entry.condition}`);
+    }
+
+    const result = entry.success ? 'success' : 'failure';
+    const button = await waitFor(() => {
+      row = get();
+      if (!row || !actionMatches(row, entry.action)) return null;
+      const condition = conditionSelect(row);
+      if (shown(condition) && condition.value !== entry.condition) return null;
+      const button = resultButton(row, result);
+      return usable(button) && button;
+    }, d, `${result} unavailable for ${entry.action} (step ${index})`);
+    check(d);
+    rowsDirty = true;
+    button.click();
+    await waitFor(() => {
+      const current = get();
+      return current && (rowMatches(current, entry) || unsupportedActions.has(key(entry.action)));
+    }, d, `Step ${index} did not confirm correctly`);
   }
 
-  // ===========================================================================
-  // Status indicator
-  // ===========================================================================
-  let statusEl = null;
-  let currentStatus = { state: 'reconnecting', text: 'Connecting…' };
-  let targetNote = '';
-  const STATUS_DOT = { connected: '#2ecc71', reconnecting: '#f39c12', disconnected: '#e74c3c' };
+  function sendSuggestion(name, d, index) {
+    if (!name || doc !== d || d.status !== 'active' || stopped || socket?.readyState !== WebSocket.OPEN) return;
+    const id = `${d.session}:${index}:${name}`;
+    if (id === lastSent) return;
+    try { socket.send(JSON.stringify({ next_action: name })); lastSent = id; }
+    catch (error) { warn('Suggestion send failed', error); socket.close(); }
+  }
 
-  function ensureIndicator() {
-    if (statusEl || !document.body) return;
+  function publishManual(d) {
+    if (d.status !== 'active') return;
+    const row = rows().find((row) => !rowResult(row));
+    if (row && !row.classList.contains('error')) sendSuggestion(suggestionName(row), d, rows().indexOf(row) + 1);
+  }
+
+  function setConnection(note) { connectionNote = note; renderStatus(); }
+  function setNote(note) { if (note !== targetNote) { targetNote = note; renderStatus(); } }
+
+  function renderStatus() {
+    if (!statusEl) return;
+    const label = `${connectionNote}${targetNote ? ` · ${targetNote}` : ''}`;
+    if (statusLabel.textContent !== label) statusLabel.textContent = label;
+    const toggle = paused ? 'Resume' : 'Pause';
+    if (statusToggle.textContent !== toggle) statusToggle.textContent = toggle;
+    statusDot.style.background = paused ? '#b88cff' : socket?.readyState === WebSocket.OPEN ? '#2ecc71' : '#f39c12';
+  }
+
+  function togglePause() {
+    paused = !paused;
+    failures = 0;
+    lastSent = '';
+    setNote(paused ? 'Paused — manual control' : 'Resuming…');
+    renderStatus();
+    schedule();
+  }
+
+  function ready() {
+    if (stopped || statusEl) return;
     statusEl = document.createElement('div');
     statusEl.id = '__bridge_status__';
     Object.assign(statusEl.style, {
       position: 'fixed', right: '12px', bottom: '12px', zIndex: '2147483647',
-      font: '12px/1.4 system-ui, -apple-system, sans-serif', padding: '6px 10px',
-      borderRadius: '6px', background: 'rgba(20,20,20,0.85)', color: '#fff',
-      display: 'flex', alignItems: 'center', gap: '8px',
-      pointerEvents: 'none', userSelect: 'none', boxShadow: '0 2px 8px rgba(0,0,0,0.3)',
+      font: '12px/1.4 system-ui,sans-serif', padding: '6px 10px', borderRadius: '6px',
+      background: '#141414e6', color: '#fff', display: 'flex', alignItems: 'center', gap: '8px',
+      pointerEvents: 'none', userSelect: 'none',
     });
-    const dot = document.createElement('span');
-    dot.className = 'dot';
-    Object.assign(dot.style, { width: '9px', height: '9px', borderRadius: '50%', display: 'inline-block', flex: '0 0 auto' });
-    const label = document.createElement('span');
-    label.className = 'label';
-
-    // The pill itself stays click-through; only this toggle takes clicks, so
-    // it never blocks the page underneath. It pauses/resumes auto-control.
-    const toggle = document.createElement('button');
-    toggle.className = 'toggle';
-    Object.assign(toggle.style, {
-      pointerEvents: 'auto', cursor: 'pointer', border: '1px solid #fff6',
-      background: 'transparent', color: '#fff', borderRadius: '4px',
-      font: 'inherit', padding: '1px 6px', flex: '0 0 auto',
+    statusDot = document.createElement('span');
+    Object.assign(statusDot.style, { width: '9px', height: '9px', borderRadius: '50%' });
+    statusLabel = document.createElement('span');
+    statusToggle = document.createElement('button');
+    statusToggle.type = 'button';
+    Object.assign(statusToggle.style, { pointerEvents: 'auto', cursor: 'pointer', color: '#fff',
+      background: 'transparent', border: '1px solid #fff6', borderRadius: '4px', font: 'inherit' });
+    statusToggle.addEventListener('click', togglePause);
+    statusEl.append(statusDot, statusLabel, statusToggle);
+    document.body.append(statusEl);
+    renderStatus();
+    roots.add(document);
+    observe(document);
+    discoverRoots(document);
+    document.addEventListener('input', (event) => {
+      if (!statusEl.contains(event.target)) schedule();
     });
-    toggle.addEventListener('click', (e) => { e.stopPropagation(); togglePaused(); });
+    schedule();
+  }
 
-    statusEl.append(dot, label, toggle);
-    document.body.appendChild(statusEl);
-    renderStatus();
-  }
-  function renderStatus() {
-    if (!statusEl) return;
-    statusEl.querySelector('.dot').style.background =
-      paused ? '#9b59b6' : (STATUS_DOT[currentStatus.state] || STATUS_DOT.disconnected);
-    statusEl.querySelector('.label').textContent = currentStatus.text + (targetNote ? ` · ${targetNote}` : '');
-    const toggle = statusEl.querySelector('.toggle');
-    if (toggle) toggle.textContent = paused ? '▶ Resume' : '⏸ Pause';
-  }
-  function togglePaused() {
-    paused = !paused;
-    log(paused ? 'auto-control PAUSED — edit Thiria manually' : 'auto-control RESUMED');
-    renderStatus();
-    if (!paused) {
-      // Resume where things stand (don't reset the solver and wipe manual
-      // edits); give any previously-stuck rows a fresh chance.
-      driveFailures.clear();
-      scheduleReconcile();
+  window.addEventListener('keydown', (event) => {
+    if (event.ctrlKey && event.shiftKey && event.key.toLowerCase() === 'p') {
+      event.preventDefault();
+      togglePause();
     }
-  }
-  function setStatus(state, text) { currentStatus = { state, text: text || state }; renderStatus(); }
-  function setTargetNote(note) {
-    if (note === targetNote) return;
-    targetNote = note || '';
-    if (targetNote) log('status:', targetNote); // surface silent waits in the console
-    renderStatus();
-  }
+  });
 
-  // ===========================================================================
-  // Lifecycle
-  // ===========================================================================
-  window.addEventListener('beforeunload', () => {
-    manualClose = true;
+  window.addEventListener('pagehide', () => {
+    stopped = true;
     clearTimeout(reconnectTimer);
-    stopHeartbeat();
-    if (socket) { try { socket.close(); } catch (_) {} }
-    if (observer) observer.disconnect();
+    clearTimeout(reconcileTimer);
+    clearInterval(heartbeatTimer);
+    observer.disconnect();
+    if (Element.prototype.attachShadow === shadowHook) Element.prototype.attachShadow = previousAttachShadow;
+    doc = null;
+    stateKey = '';
+    appliedSession = null;
+    lastSent = '';
+    socket?.close();
   });
 
-  // Ctrl+Shift+P: pause/resume auto-control (backup for the pill button).
-  window.addEventListener('keydown', (e) => {
-    if (e.ctrlKey && e.shiftKey && (e.key === 'P' || e.key === 'p')) {
-      e.preventDefault();
-      togglePaused();
-    }
+  window.addEventListener('pageshow', (event) => {
+    if (!event.persisted || !stopped) return;
+    stopped = false;
+    rowsDirty = true;
+    reconcileTimer = null;
+    pruneRoots();
+    for (const root of roots) observe(root);
+    hookShadowRoots();
+    connect();
   });
 
+  hookShadowRoots();
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', ready, { once: true });
+  else ready();
   connect();
-  const onReady = () => { ensureIndicator(); attachObserver(); };
-  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', onReady);
-  else onReady();
 })();
