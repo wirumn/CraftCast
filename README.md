@@ -1,166 +1,32 @@
 # CraftCast
 
-CraftCast is a Dalamud plugin for *Final Fantasy XIV* that bridges your in-game
-crafting session to the [Thiria](https://thiria.com/expert/) web solver. It
-observes the actions you actually perform (plus the resulting condition and
-success/failure), maintains the full step history of the active craft, and
-broadcasts it to a paired userscript over a local WebSocket; the solver's
-suggested next action is sent back and shown as an overlay in game.
+CraftCast connects your Final Fantasy XIV crafting session to the [Thiria expert solver](https://thiria.com/expert/). A Dalamud plugin and browser userscript keep the solver page updated as you craft and show its next suggested action above the Synthesis window.
 
-It runs automatically — start a synthesis and the overlay appears.
+## Install
 
-## Installation
+1. Open `/xlsettings`, go to **Experimental**, and add this under **Custom Plugin Repositories**:
 
-### 1. The plugin (via custom Dalamud repo, auto-built)
-
-Every push to `main` is built by GitHub Actions and published to the `repo`
-branch as an installable Dalamud repository.
-
-1. In game: `/xlsettings` → **Experimental** tab.
-2. Under **Custom Plugin Repositories**, add:
-
-   ```
+   ```text
    https://raw.githubusercontent.com/wirumn/CraftCast/repo/pluginmaster.json
    ```
 
-3. Save, then `/xlplugins` → search **CraftCast** → Install.
-4. Updates appear in the plugin installer automatically whenever a new build
-   is pushed (the `AssemblyVersion` in `CraftCast.csproj` must be bumped for
-   Dalamud to offer the update).
+2. Open `/xlplugins`, search for **CraftCast**, and install it.
+3. Install [Tampermonkey](https://www.tampermonkey.net/) in your browser, then open the [userscript](https://raw.githubusercontent.com/wirumn/CraftCast/main/dashboard-sync.user.js) and accept the installation.
+4. Open [Thiria](https://thiria.com/expert/). The bottom-right indicator shows **Connected** when it can reach the plugin.
 
-### 2. The userscript (browser side)
+Check Thiria's **Relic** setting before crafting. Use **Cosmic 9+** for a qualifying Cosmic or Splendorous mainhand, or **None** otherwise. The wrong setting changes quality calculations on Good conditions.
 
-1. Install [Tampermonkey](https://www.tampermonkey.net/) in your browser.
-2. Open the raw script and Tampermonkey will offer to install it:
+## Use
 
-   ```
-   https://raw.githubusercontent.com/wirumn/CraftCast/main/dashboard-sync.user.js
-   ```
+Keep Thiria open and start a craft in game. CraftCast fills in your stats and recipe settings, then updates the steps as you use actions. The overlay shows Thiria's recommendation; you choose which action to use.
 
-3. Open https://thiria.com/expert/ — a status pill appears bottom-right and
-   turns green ("Connected") while the game is running with the plugin loaded.
+To edit the Thiria page manually, click **Pause** or press **Ctrl+Shift+P**. **Resume** brings the page back into line with your in-game history.
 
-### 3. One-time manual setting
+## Limits and troubleshooting
 
-On the Thiria page, set the **Relic** dropdown to match your mainhand
-(e.g. **Cosmic 9+** for phase 9+ Cosmic/Splendorous relics). The game gives no
-clean way to detect the relic phase, and it changes the Good-condition quality
-bonus (×1.75 instead of ×1.5) — if it's wrong, Thiria mis-simulates quality on
-every Good-condition touch. The bridge never overwrites this field.
+- If the plugin starts tracking partway through a craft, automatic sync waits for the next craft.
+- **Material Miracle** is skipped. Thiria does not simulate its buff, so recommendations may be inaccurate after using it.
+- Actions missing from Thiria's action list can stall sync. Check the browser's status indicator if the overlay stops updating.
+- If sync stays stuck, correct the issue and use **Pause**, then **Resume**, to retry.
 
-## Usage
-
-1. Have the Thiria tab open (pill green) **before** starting a craft.
-2. Start a synthesis. The bridge resets the solver, pushes your stats and the
-   recipe constants, clicks Start, and from then on mirrors every action you
-   perform — including ones the solver didn't suggest, step-free actions
-   (Final Appraisal, Heart and Soul, Careful Observation), and Rapid/Hasty
-   failures. Thiria's recommended next action shows in the in-game overlay.
-3. The status pill narrates what the bridge is doing ("syncing step 7",
-   "waiting for solver"). The browser console (`F12`) logs every decision with
-   a `[bridge]` prefix.
-
-If the plugin attaches mid-craft it cannot reconstruct earlier steps, so
-auto-sync stays off for that craft (pill: "attached mid-craft") and resumes on
-the next one.
-
-## How the sync works
-
-The plugin is the single source of truth:
-
-- A hook on `ActionManager.UseAction` records **which action you really used**
-  (manual play, macros, and other plugins' casts all pass through it).
-- Each action resolves to the condition rolled afterwards and, for fallible
-  actions (Rapid Synthesis, Hasty/Daring Touch), success or failure inferred
-  from the progress/quality bars. Bar reads are sanity-checked against the
-  recipe sheet's real maxes; on content where an AtkValue is junk, the
-  affected bar is ignored rather than fabricating failures.
-- Recipe constants (difficulty/durability/quality, job level, star/expert rating,
-  and the exact progress/quality dividers and level-penalty modifiers) come
-  from the **Recipe sheet**, not the UI. When Thiria doesn't recognize an item
-  (⚠️ next to Rating), the userscript switches the Rating to Custom and feeds
-  those exact values, so the simulation matches the game's formulas.
-- Every broadcast carries the **entire history** of the current craft plus a
-  per-craft session id. Chained crafts are detected via step regression or a
-  recipe-id change, so each craft reliably gets a fresh session, and dropped
-  frames or reconnects self-heal because the next message describes the whole
-  craft.
-
-The userscript is an idempotent reconciler: it converges Thiria's step list to
-that history — resetting on a new session, correcting the action on a row when
-you deviated from the suggestion (via the row's edit pencil), setting the
-rolled condition, and clicking Success/Failure.
-
-### Cosmic actions Thiria doesn't model
-
-Thiria's solver knows one cosmic action (Stellar Steady Hand) but **not
-Material Miracle**. When you use Material Miracle, the bridge skips it (it's a
-step-free condition buff — no Thiria row), so the rest of the craft stays
-aligned and the good conditions it forces still reach Thiria through the next
-step. Thiria simply won't *recommend* Material Miracle, because it can't model
-it. For cosmic missions built around it, your Artisan/Raphael solver already
-handles it optimally.
-
-### Taking manual control
-
-If something goes wrong mid-craft and you want to fix Thiria by hand, click the
-**⏸ Pause** button on the status pill (or press **Ctrl+Shift+P**). While paused
-the bridge touches nothing on the page — no Start/Reset, no condition or
-Success/Failure clicks — so your manual edits stick. The pill turns purple and
-the in-game overlay keeps updating. Click **▶ Resume** (or Ctrl+Shift+P again)
-to hand control back; on resume it re-syncs the rows to the craft history
-without resetting the solver, so it won't wipe a craft in progress.
-
-### The two "Level" fields
-
-Thiria's Player panel and Item panel both have a field labelled **Level** —
-they are different things and the bridge sets both, **both on the 1-100 job
-level scale**:
-
-- **Player → Level** is your character level (e.g. 100).
-- **Item → Level** is the recipe's job level (e.g. 100 for endgame recipes,
-  90 for Endwalker ones). It must NOT be the internal rlvl (729, 771, …):
-  Thiria's divisor table is keyed on job levels and its level penalty only
-  triggers on multiples of 10, so an rlvl silently skips the penalty and
-  inflates every simulated bar by 10-25%.
-
-## Troubleshooting
-
-| Symptom | Meaning |
-|---|---|
-| Pill: "waiting for craft data" forever | The plugin is outdated and sending zeroed stats — update it. |
-| Pill: "attached mid-craft — auto-sync off" | Plugin/tab connected after the craft started; finish this craft and the next one syncs. |
-| Pill: "step N out of sync" | A Thiria row disagrees with the game and auto-repair gave up — check the browser console. |
-| Quality drifts only on Good conditions | The Relic dropdown doesn't match your mainhand. |
-| Bars drift by ~10/25% | Player Level or item parameters wrong — make sure the plugin is current; it sets these itself. |
-
-When reporting a problem, grab the browser console (`[bridge]` lines) and the
-Dalamud log (`/xllog`, `[CraftCast]` lines) covering one craft.
-
-## Project layout
-
-```
-CraftCastPlugin.cs          IAsyncDalamudPlugin entry point
-Services.cs                 [PluginService] locator
-System.cs                   Long-lived singletons
-Controllers/
-  CraftActionTracker.cs     UseAction hook → observed crafting actions
-  CraftStateController.cs   Framework-tick session/history model → broadcasts state
-Networking/
-  WebSocketServerService.cs Async local WebSocket server (port 8014)
-  Messages.cs               Wire models + source-generated JSON
-State/
-  SharedState.cs            Lock-guarded bridge between network and render threads
-Windows/
-  OverlayWindow.cs          Borderless overlay anchored to the Synthesis window
-dashboard-sync.user.js      Tampermonkey userscript (browser side)
-.github/workflows/build.yml CI: build → package → publish pluginmaster on the repo branch
-```
-
-## Releasing an update
-
-1. Make changes, bump `<AssemblyVersion>` in `CraftCast.csproj`.
-2. Push to `main`. The workflow builds the plugin, packages `latest.zip`, and
-   force-pushes `latest.zip` + `pluginmaster.json` to the `repo` branch.
-3. In game, the plugin installer offers the update. Userscript changes are
-   picked up by Tampermonkey from the raw `main` URL (bump `@version`).
+When [reporting a bug](https://github.com/wirumn/CraftCast/issues), include the browser console's `[bridge]` messages and the Dalamud log (`/xllog`, filtered to `CraftCast`) from the affected craft.
