@@ -1,0 +1,22 @@
+[{
+  "Name": "CraftCast",
+  "Description": "Reads the active craft condition, step, your stats, and the recipe's constraints each framework tick, broadcasts them over a local WebSocket (127.0.0.1:8014) to a paired userscript, and renders the solver's suggested next action as a borderless overlay anchored to the Synthesis window.",
+  "DownloadCount": 0,
+  "RepoUrl": "https://github.com/wirumn/CraftCast",
+  "DalamudApiLevel": 15,
+  "DownloadLinkInstall": "https://raw.githubusercontent.com/wirumn/CraftCast/repo/latest.zip",
+  "Author": "wirumn",
+  "Punchline": "Bridges live FFXIV crafting state to a web solver over a local WebSocket.",
+  "InternalName": "CraftCast",
+  "Tags": [
+    "crafting",
+    "overlay",
+    "websocket",
+    "solver"
+  ],
+  "LastUpdate": 1792832418,
+  "ApplicableVersion": "any",
+  "DownloadLinkUpdate": "https://raw.githubusercontent.com/wirumn/CraftCast/repo/latest.zip",
+  "DownloadLinkTesting": "https://raw.githubusercontent.com/wirumn/CraftCast/repo/latest.zip",
+  "AssemblyVersion": "3.1.9.0"
+}]
